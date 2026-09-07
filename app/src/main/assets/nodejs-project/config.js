@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 // BAT-1071: pure, require-safe bridge-token validator (no config init).
 const { isCanonicalBridgeToken } = require('./bridge-token');
+const { formatSessionBanner } = require('./log-safe');
 
 // ============================================================================
 // WORKSPACE & LOG PATHS
@@ -181,10 +182,26 @@ if (!fs.existsSync(configPath)) {
 
 const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 
+// BAT-1309: the ONE definition of the app version on the Node side.
+//
+// It used to be hand-maintained in three places -- package.json, mcp-client's
+// clientInfo, and providers/xai.js -- and git history shows they drift: the
+// package.json copy shipped stale across 1.10.0 -> 2.0.0 -> 2.1.0 -> 2.1.1 and
+// was only ever repaired by hand, while it was the value the user-visible
+// /version command actually printed.
+//
+// `appVersion` is written by ConfigManager from BuildProvenance.installed(),
+// i.e. PackageManager's view of the INSTALLED package, so it cannot drift from
+// what Android actually has. Degrades to 'unknown' rather than to a stale
+// literal: a wrong version is worse than an absent one.
+const APP_VERSION = (typeof config.appVersion === 'string' && config.appVersion.trim())
+    ? config.appVersion.trim()
+    : 'unknown';
+
 // BAT-1161 P1A: session-boundary banner, emitted right after config parse so the Kotlin
 // startup-watermark forwarder and humans can delimit each :node session. boot/build/version
 // are generated Kotlin-side and transported via config.json — never a packaged asset (BAT-1073).
-log(`=== SESSION boot=${config.bootId || 'unknown'} build=${config.gitSha || '?'} ver=${config.appVersion || '?'} logfmt=${LOG_FMT_VERSION} pid=${process.pid} ===`, 'INFO');
+log(formatSessionBanner(config, APP_VERSION, LOG_FMT_VERSION, process.pid), 'INFO');
 
 // Strip hidden line breaks from secrets (clipboard paste can include \r\n, Unicode separators)
 function normalizeSecret(val) {
@@ -437,11 +454,16 @@ const CUSTOM_FORMAT = (typeof config.customFormat === 'string' ? config.customFo
 const OPENROUTER_FALLBACK_MODEL = (typeof config.openrouterFallbackModel === 'string' ? config.openrouterFallbackModel : '').trim();
 const OPENROUTER_MODEL_CONTEXT = parseInt(config.openrouterModelContext, 10) || 0;
 const OPENROUTER_FALLBACK_CONTEXT = parseInt(config.openrouterFallbackContext, 10) || 0;
+// BAT-1315: these MUST match `defaultModel` per provider in model-registry.json.
+// This chain is a full copy of the registry's defaults with nothing reconciling
+// them — the same shape as ConfigClaimImporter.kt's `when`. Update all of them
+// together, or a fresh install lands on a different model than the registry
+// advertises. Tracked for a proper single-source fix.
 const _defaultModel = PROVIDER === 'openai' ? 'gpt-5.6-sol'
     : PROVIDER === 'openrouter' ? 'anthropic/claude-sonnet-4-6'
     : PROVIDER === 'custom' ? ''
-    : PROVIDER === 'xai' ? 'grok-4.5'
-    : 'claude-opus-4-8';
+    : PROVIDER === 'xai' ? 'grok-4.6'
+    : 'claude-opus-5';
 // BAT-513: model resolves from runtime_state.json first, then
 // config.json, then the per-provider safe default. The agent_settings.json
 // overlay path (resolveActiveModel) still applies AFTER this for live
@@ -1037,6 +1059,9 @@ module.exports = {
 
     // Config object (for accessing optional API keys etc.)
     config,
+
+    // BAT-1309: every Node-side consumer of the app version reads THIS.
+    APP_VERSION,
 
     // BAT-513: handle on the cross-process runtime state file so
     // command handlers (`/model`, `/provider` in message-handler.js)
