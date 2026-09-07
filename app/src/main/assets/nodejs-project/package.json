@@ -1,6 +1,6 @@
 {
   "name": "seekerclaw-agent",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "SeekerClaw AI Agent — OpenClaw-compatible gateway for Solana Seeker",
   "main": "main.js",
   "private": true

@@ -5,8 +5,15 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-09-07
+
 ### Added
 
+- **Four new AI models to choose from.** Anthropic gains **Opus 5** and
+  **Fable 5.1**, xAI gains **Grok 4.6**, and OpenAI gains **GPT-6 Astra**.
+  Astra is offered but not made the default — it costs roughly 2.5× the current
+  OpenAI default per token, so switching to it is a deliberate choice.
+  (BAT-1315, BAT-1316, #455, #456, #458)
 - **Interface polish pass across the app** — one consistent style per pattern
   instead of several competing ones: unified section headers and in-card
   labels, a single search field treatment on Logs and Skills, a shared
@@ -15,8 +22,39 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
   alone, so state is readable without distinguishing hues. 42 findings from a
   full interface audit. (BAT-1247, #449)
 
+### Changed
+
+- **Better default models.** New conversations now start on **Opus 5** for
+  Anthropic (was Opus 4.8) and **Grok 4.6** for xAI (was Grok 4.5). If you have
+  a model explicitly selected it is kept — including models no longer offered in
+  the picker. (BAT-1315, BAT-1316)
+- **The model picker now lists current models only** — the newest two per family
+  rather than every past release. Older models keep working if you already have
+  one selected, and any model can still be entered by name in the Custom model
+  field. (BAT-1315, BAT-1316)
+- **Targets Android 16 (API 36).** Required for app updates on Google Play from
+  31 August 2026. No dependency changes and no change to behavior; the app's
+  own native library is also now 16 KB page-size aligned. (BAT-1187, #448)
+
 ### Fixed
 
+- **The agent no longer asks twice before sending an SMS or placing a call.** It
+  would ask for confirmation itself, and then the app would ask again for the
+  same action. Now only the app's confirmation appears — the one that actually
+  controls whether it happens. (BAT-1306, #454)
+- **`/version` now reports the version you are actually running.** It read a
+  number kept in a separate file by hand, which had been wrong for several
+  releases. The same number is also what the app reports to any third-party tool
+  servers you connect. (BAT-1309, #454)
+- **A failed turn can no longer trap the agent in a loop.** When a reply was
+  rejected for malformed reasoning content, the saved progress that caused it
+  could be reloaded on the next attempt and fail identically, indefinitely. That
+  saved progress is now set aside so the next attempt starts clean.
+  (BAT-1290, #452)
+- **The build details shown in Settings and System are now always the running
+  build.** After a quick rebuild they could show the *previous* build's commit
+  while running current code, which made "is this the version I just installed?"
+  unanswerable. (BAT-1293, #453)
 - **The agent no longer loses your instruction on a long task.** On a task that
   ran many tool steps in a single turn, the oldest part of the conversation was
   trimmed to stay within limits — and that could remove the very message you
@@ -32,14 +70,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
   with confidence the agent continues from the restored conversation instead of
   asserting a wrong one. (BAT-1283, #450)
 
-### Changed
-
-- **Targets Android 16 (API 36).** Required for app updates on Google Play from
-  31 August 2026. No dependency changes and no change to behavior; the app's
-  own native library is also now 16 KB page-size aligned. (BAT-1187, #448)
-
 ### Security
 
+- **Google Play builds are now verified before release.** The check confirming
+  an app package carries the identity of the code it was built from covered the
+  direct-download build but not the Play Store one — our most widely
+  distributed. A package that fails the check is now rejected and deleted rather
+  than shipped. (BAT-1308, #454)
 - **Sharing logs no longer includes message text.** The share payload now
   replaces each message body with a marker recording only its length, keeping
   timestamps, levels and sources intact so a shared log is still useful for

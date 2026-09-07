@@ -507,6 +507,52 @@ BAT-549 introduced reasoning content preservation across all 4 providers, plus a
 - Verify the model id matches the R1 regex (`/(?:^|\/)deepseek-(?:reasoner|r1)(?:-|$)/i`).
 - Check the user has NOT enabled the per-Custom echo override (`/think echo on` flips it from chat; Settings > AI Provider > Custom > Advanced (Reasoning) flips it from the UI). The override resets automatically when the user edits any signed Custom config field (model | baseUrl | format | header keys), so if they recently swapped from V4 to R1 the override should already be off — but confirm with `/think` (no args) which surfaces the current value.
 
+### Reasoning-400 Checkpoint Quarantine — `[ReasoningRecovery]` Log Lines (BAT-1290)
+
+**Symptoms:** A turn fails with a provider 400 about reasoning content, and
+`node_debug.log` carries `[ReasoningRecovery]` lines. Or a `/resume` keeps
+failing the same way each time it is retried.
+
+**Check:**
+```
+grep "\[ReasoningRecovery\]" node_debug.log | tail -20
+```
+
+**Diagnosis:** When a turn 400s on reasoning content, the poisoned segment is
+truncated in memory and the on-disk checkpoint is repaired so a later resume
+cannot reload the same poison. Each attempt logs one structured outcome. The
+reason string is the useful part:
+
+| Reason / line | Meaning | Action |
+|---|---|---|
+| `truncated at index N` | Normal repair. The poisoned tail was cut and the checkpoint rewritten. | None — this is the mechanism working. |
+| `quarantined resumed checkpoint (parse-failed)` | The checkpoint file was not readable JSON, or not a JSON object at all. It was moved aside so it cannot be reloaded. | None. The task is not resumable, but the loop is broken. Start a new turn. |
+| `quarantined resumed checkpoint (no-cut-point)` | The checkpoint parsed, but no safe truncation point existed, so it was quarantined rather than left resumable. | None. As above. |
+| `checkpoint rejected — no tasksDir supplied (caller bug)` | **Code defect.** The recovery path was called without the checkpoint directory. | Report it. Recovery did not run. |
+| `checkpoint failed — invalid checkpointKind=...` | **Code defect.** Caller passed an unknown checkpoint kind. | Report it. |
+| `checkpoint rejected — taskId escapes tasksDir` | A task id tried to resolve outside the checkpoint directory; it was sanitized and refused. | Report it if it recurs — ids are generated internally. |
+| `forensic copy failed` (WARN) | The diagnostic copy could not be written. Repair itself still ran. | Usually disk space. Check free space. |
+| `quarantine FAILED` (**ERROR**) | The poisoned checkpoint could **not** be moved aside. It may be reloaded and re-trigger the same 400. | Report it. As a stopgap, `/new` starts a clean conversation. |
+
+**Where the files live:**
+```
+adb shell run-as com.seekerclaw.app ls -la files/workspace/tasks
+adb shell run-as com.seekerclaw.app ls -la files/workspace/recovery
+```
+`tasks/` holds live checkpoints; `recovery/` is created on the first quarantine
+and holds the forensic copies. An absent `recovery/` simply means no quarantine
+has ever been needed.
+
+**Fix:**
+1. `truncated` / `quarantined` outcomes → nothing to do. The loop is broken by
+   design and the next turn starts clean.
+2. Any `caller bug`, `invalid checkpointKind`, or `quarantine FAILED` → a code
+   defect, not user-inflicted. Report it with the surrounding log lines.
+3. Historic note: builds at or before v2.2.0 wrote the quarantine to a directory
+   nothing ever created, so **the on-disk repair never ran** and a poisoned
+   checkpoint could be reloaded indefinitely. If a log shows the loop with no
+   `[ReasoningRecovery]` lines at all, that is a pre-v2.3.0 build.
+
 ### "Show Thinking Status" Toggled But No "Thinking..." Bubble Appears
 **Symptoms:** User toggled "Show thinking status" on (Settings > AI Provider > Reasoning, or `/think show`) but the temporary "Thinking..." Telegram bubble never appears during turns.
 **Diagnosis:** The bubble requires ALL THREE gates: `reasoningEnabled === true`, `reasoningDisplayInChat === true`, AND `reasoningSupport === 'yes'` for the active model. If any are missing, the bubble is suppressed by design (a "Thinking..." status that lies about whether thinking is happening would be worse than no status). Common gaps:

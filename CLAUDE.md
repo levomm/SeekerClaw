@@ -56,7 +56,7 @@
 
 | Version | Current | Location |
 |---------|---------|----------|
-| **App** | `2.2.0` (code 23) | `app/build.gradle.kts` → `appVersionName` / `appVersionCode` vals |
+| **App** | `2.3.0` (code 24) | `app/build.gradle.kts` → `appVersionName` / `appVersionCode` vals |
 | **OpenClaw** | `2026.4.10` | `app/build.gradle.kts` → `openclawVersion` val |
 | **Node.js** | `18 LTS` | `app/build.gradle.kts` → `nodejsVersion` val |
 
