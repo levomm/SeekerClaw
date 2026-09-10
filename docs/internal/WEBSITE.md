@@ -1,6 +1,6 @@
 # WEBSITE.md — Website Content
 
-> Last updated: 2026-07-12 | Last deployed: _never_
+> Last updated: 2026-09-10 | Last deployed: _never_
 >
 > **Rule:** Every item must earn its screen space. Less is more.
 > Before deploying, review the Editorial Notes in each section.
@@ -34,11 +34,20 @@
 <!-- Maps to: config.js → stats[] -->
 <!-- Derived from: PROJECT.md → Stats -->
 
+<!-- VERIFY BEFORE PUBLISHING. Every number here is re-derivable; do not copy
+     forward. Checked 2026-09-10 at v2.3.1:
+       Built-in Tools  64  = assembled TOOLS.length (telegram, no MCP).
+                            NEVER a raw grep of input_schema — that
+                            overcounts badly (it returned 79).
+       PRs Shipped    364  = gh pr list --state merged. Was "437+", which was
+                            a PR *number*, not a count — overstated.
+       Seeker Devices      = external figure, not ours to verify. -->
+
 | Value | Label | Why this stat? |
 |-------|-------|---------------|
 | 150,000+ | Seeker Devices | Social proof — large addressable market |
 | 64 | Built-in Tools | Shows depth — but consider "60+" for cleaner number |
-| 437+ | PRs Shipped | Shows velocity — but do users care about PRs? |
+| 364 | PRs Shipped | Shows velocity — but do users care about PRs? |
 | 24/7 | Autonomous Agent | Key differentiator — always on |
 
 <!-- REVIEW: Is "PRs Shipped" the right 3rd stat? Alternatives:
