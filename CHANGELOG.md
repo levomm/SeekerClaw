@@ -7,19 +7,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [2.3.1] - 2026-09-10
 
-> **A packaging release — no functional changes from 2.3.0.** The Solana dApp
-> Store and Google Play builds now carry the same version and the same version
-> code. The 2.3.0 dApp Store submission was returned over a publisher-profile
-> detail unrelated to the app, and resubmitting requires a new version code;
-> rather than let one version name cover two different version codes, both
-> stores move to 2.3.1 together. If you are already running 2.3.0 there is
-> nothing new to look for here. Provider setups, agent memory, and settings are
-> unchanged.
+> **A packaging release — no functional changes from 2.3.0.** Both store builds
+> now carry the same version and version code. If you are already running
+> 2.3.0, there is nothing new to look for here. Provider setups, agent memory,
+> and settings are unchanged.
 
 ### Changed
 
-- Version raised to 2.3.1 (code 25) so both store listings sit on a single
-  version line. No application code differs from 2.3.0.
+- Version raised to 2.3.1 (code 25). No application code differs from 2.3.0.
 
 ## [2.3.0] - 2026-09-07
 
