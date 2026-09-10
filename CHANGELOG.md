@@ -5,7 +5,33 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.3.1] - 2026-09-10
+
+> **A packaging release — no functional changes from 2.3.0.** The Solana dApp
+> Store and Google Play builds now carry the same version and the same version
+> code. The 2.3.0 dApp Store submission was returned over a publisher-profile
+> detail unrelated to the app, and resubmitting requires a new version code;
+> rather than let one version name cover two different version codes, both
+> stores move to 2.3.1 together. If you are already running 2.3.0 there is
+> nothing new to look for here. Provider setups, agent memory, and settings are
+> unchanged.
+
+### Changed
+
+- Version raised to 2.3.1 (code 25) so both store listings sit on a single
+  version line. No application code differs from 2.3.0.
+
 ## [2.3.0] - 2026-09-07
+
+> **Four new models, better defaults, and a set of fixes to things the app was
+> quietly getting wrong about itself.** Adds Opus 5, Fable 5.1, Grok 4.6 and
+> GPT-6 Astra, and moves the Anthropic and xAI defaults to the newer models.
+> Also fixes a double confirmation before sending an SMS or placing a call, a
+> `/version` that reported a number kept by hand, and build details that could
+> show the previous build while running the current one. Fully
+> backward-compatible — existing provider setups, agent memory, and settings are
+> unchanged, including a model you selected that is no longer offered in the
+> picker.
 
 ### Added
 
