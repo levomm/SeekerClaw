@@ -242,10 +242,19 @@ reminders, research, and more. Export, import, and share skills as files.
    - "MCP server support" — developer feature
    Keep the items that make users say "I want that" -->
 
+### Distribution — LIVE
+
+<!-- Kept here because a release post nearly shipped without store links:
+     "dApp Store listing" sat under Next long after it went live, and Google
+     Play was not mentioned at all. Both are listed. Confirmed 2026-09-08. -->
+
+- **Google Play** — live
+- **Solana dApp Store** — live
+- **Direct APK** — GitHub Releases
+
 ### Next
 - Transaction monitoring & smart alerts
 - Vector embeddings for semantic memory
-- dApp Store listing
 - Community skill marketplace
 
 ### Future
