@@ -3,6 +3,7 @@
 // Adding a new provider = 1 new file + register() call here.
 
 const { log } = require('../config');
+const { wrapFormatTools } = require('../deferred-tools');
 
 const adapters = new Map();
 
@@ -11,7 +12,7 @@ function register(adapter) {
         log('[Provider] Attempted to register adapter without id', 'WARN');
         return;
     }
-    adapters.set(adapter.id, adapter);
+    adapters.set(adapter.id, wrapFormatTools(adapter));
 }
 
 /**
