@@ -21,17 +21,26 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Give test build its own package id
+      - name: Give hardened test build its own package id and label
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          p = Path('app/build.gradle.kts')
-          s = p.read_text()
+
+          gradle = Path('app/build.gradle.kts')
+          s = gradle.read_text()
           old = 'applicationId = "com.seekerclaw.app"'
-          new = 'applicationId = "com.seekerclaw.app.contextlite"'
+          new = 'applicationId = "com.seekerclaw.app.contextlitehardened"'
           if old not in s:
               raise SystemExit('applicationId line not found')
-          p.write_text(s.replace(old, new, 1))
+          gradle.write_text(s.replace(old, new, 1))
+
+          strings = Path('app/src/main/res/values/strings.xml')
+          t = strings.read_text()
+          old_label = '<string name="app_name">SeekerClaw</string>'
+          new_label = '<string name="app_name">SeekerClaw Hardened</string>'
+          if old_label not in t:
+              raise SystemExit('app_name line not found')
+          strings.write_text(t.replace(old_label, new_label, 1))
           PY
 
       - name: Apply Context Lite hardening
@@ -45,9 +54,9 @@ jobs:
       - name: Build Google Play debug APK
         run: ./gradlew assembleGooglePlayDebug
 
-      - name: Upload parallel APK
+      - name: Upload hardened parallel APK
         uses: actions/upload-artifact@v4
         with:
-          name: seekerclaw-context-lite-parallel
+          name: seekerclaw-context-lite-hardened
           path: app/build/outputs/apk/googlePlay/debug/*.apk
           retention-days: 14
