@@ -34,6 +34,14 @@ jobs:
           p.write_text(s.replace(old, new, 1))
           PY
 
+      - name: Apply Context Lite hardening
+        run: node scripts/apply-context-lite-hardening.js
+
+      - name: Syntax-check patched Node runtime
+        run: |
+          node --check app/src/main/assets/nodejs-project/ai.js
+          node --check app/src/main/assets/nodejs-project/tools/system.js
+
       - name: Build Google Play debug APK
         run: ./gradlew assembleGooglePlayDebug
 
