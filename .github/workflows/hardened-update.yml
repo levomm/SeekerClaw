@@ -46,12 +46,12 @@ jobs:
             -validity 10000 \
             -dname 'CN=SeekerClaw Hardened,O=OSX01,C=EE'
 
-      - name: Prepare Hardened 2.3.2 variant
+      - name: Prepare Hardened 2.3.3 variant
         shell: bash
         run: |
           set -euo pipefail
-          sed -i 's/val appVersionName = "2.3.1"/val appVersionName = "2.3.2"/' app/build.gradle.kts
-          sed -i 's/val appVersionCode = 25/val appVersionCode = 26/' app/build.gradle.kts
+          sed -i 's/val appVersionName = "2.3.1"/val appVersionName = "2.3.3"/' app/build.gradle.kts
+          sed -i 's/val appVersionCode = 25/val appVersionCode = 27/' app/build.gradle.kts
           sed -i 's/applicationId = "com.seekerclaw.app"/applicationId = "com.seekerclaw.app.contextlitehardened"/' app/build.gradle.kts
           sed -i 's#<string name="app_name">SeekerClaw</string>#<string name="app_name">SeekerClaw Hardened</string>#' app/src/main/res/values/strings.xml
           python3 - <<'PY'
@@ -64,8 +64,8 @@ jobs:
               raise SystemExit('buildTypes anchor not found')
           p.write_text(s.replace(needle, repl, 1))
           PY
-          grep -F 'val appVersionName = "2.3.2"' app/build.gradle.kts
-          grep -F 'val appVersionCode = 26' app/build.gradle.kts
+          grep -F 'val appVersionName = "2.3.3"' app/build.gradle.kts
+          grep -F 'val appVersionCode = 27' app/build.gradle.kts
           grep -F 'applicationId = "com.seekerclaw.app.contextlitehardened"' app/build.gradle.kts
           grep -F 'signingConfig = signingConfigs.getByName("dappStore")' app/build.gradle.kts
 
@@ -85,7 +85,7 @@ jobs:
           BT=$(ls ${ANDROID_HOME}/build-tools/ | sort -V | tail -1)
           AAPT=${ANDROID_HOME}/build-tools/${BT}/aapt
           APKSIGNER=${ANDROID_HOME}/build-tools/${BT}/apksigner
-          "$AAPT" dump badging "$APK" | head -1 | grep -F "package: name='com.seekerclaw.app.contextlitehardened' versionCode='26' versionName='2.3.2'"
+          "$AAPT" dump badging "$APK" | head -1 | grep -F "package: name='com.seekerclaw.app.contextlitehardened' versionCode='27' versionName='2.3.3'"
           "$APKSIGNER" verify --print-certs "$APK"
 
       - name: Collect APK
@@ -93,11 +93,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p hardened-out
-          cp app/build/outputs/apk/dappStore/debug/app-dappStore-debug.apk hardened-out/SeekerClaw-Hardened-2.3.2.apk
+          cp app/build/outputs/apk/dappStore/debug/app-dappStore-debug.apk hardened-out/SeekerClaw-Hardened-2.3.3.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: seekerclaw-hardened-2.3.2
-          path: hardened-out/SeekerClaw-Hardened-2.3.2.apk
+          name: seekerclaw-hardened-2.3.3
+          path: hardened-out/SeekerClaw-Hardened-2.3.3.apk
           retention-days: 30
