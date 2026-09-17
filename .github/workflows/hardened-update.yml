@@ -8,6 +8,8 @@ on:
 jobs:
   hardened-update:
     runs-on: ubuntu-latest
+    env:
+      KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -20,6 +22,13 @@ jobs:
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
+
+      - name: Decode stable dApp signing key
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$KEYSTORE_BASE64"
+          echo "$KEYSTORE_BASE64" | base64 -d > app/dappstore-release.jks
 
       - name: Prepare update-compatible hardened variant
         shell: bash
@@ -36,6 +45,21 @@ jobs:
 
       - name: Build update APK
         run: ./gradlew assembleDappStoreDebug
+        env:
+          SEEKERCLAW_KEYSTORE_PATH: dappstore-release.jks
+          SEEKERCLAW_STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          SEEKERCLAW_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          SEEKERCLAW_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+
+      - name: Verify APK identity and signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=app/build/outputs/apk/dappStore/debug/app-dappStore-debug.apk
+          AAPT=${ANDROID_HOME}/build-tools/$(ls ${ANDROID_HOME}/build-tools/ | sort -V | tail -1)/aapt
+          APKSIGNER=${ANDROID_HOME}/build-tools/$(ls ${ANDROID_HOME}/build-tools/ | sort -V | tail -1)/apksigner
+          "$AAPT" dump badging "$APK" | head -1 | grep -F "package: name='com.seekerclaw.app.contextlitehardened' versionCode='26' versionName='2.3.2'"
+          "$APKSIGNER" verify --print-certs "$APK"
 
       - name: Collect update APK
         shell: bash
