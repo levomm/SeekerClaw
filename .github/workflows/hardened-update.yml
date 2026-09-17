@@ -1,0 +1,52 @@
+name: Hardened Update APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  hardened-update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Prepare update-compatible hardened variant
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i 's/val appVersionName = "2.3.1"/val appVersionName = "2.3.2"/' app/build.gradle.kts
+          sed -i 's/val appVersionCode = 25/val appVersionCode = 26/' app/build.gradle.kts
+          sed -i 's/applicationId = "com.seekerclaw.app"/applicationId = "com.seekerclaw.app.contextlitehardened"/' app/build.gradle.kts
+          sed -i 's#<string name="app_name">SeekerClaw</string>#<string name="app_name">SeekerClaw Hardened</string>#' app/src/main/res/values/strings.xml
+          grep -F 'val appVersionName = "2.3.2"' app/build.gradle.kts
+          grep -F 'val appVersionCode = 26' app/build.gradle.kts
+          grep -F 'applicationId = "com.seekerclaw.app.contextlitehardened"' app/build.gradle.kts
+          grep -F '<string name="app_name">SeekerClaw Hardened</string>' app/src/main/res/values/strings.xml
+
+      - name: Build update APK
+        run: ./gradlew assembleDappStoreDebug
+
+      - name: Collect update APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p hardened-out
+          cp app/build/outputs/apk/dappStore/debug/app-dappStore-debug.apk hardened-out/SeekerClaw-Hardened-2.3.2-update.apk
+
+      - name: Upload update APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: seekerclaw-hardened-update
+          path: hardened-out/SeekerClaw-Hardened-2.3.2-update.apk
+          retention-days: 14
