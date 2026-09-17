@@ -1,8 +1,11 @@
 ---
 name: security-audit
 description: Authorized, defensive website security audit workflow that stays passive and non-invasive by default.
+version: 1.0.1
+priority: 100
 triggers:
   - turvaaudit
+  - turva audit
   - security audit
   - pentest
   - penetration test
@@ -15,7 +18,7 @@ Use this skill when the user asks to audit, pentest, assess, review, or check th
 
 ## Default operating mode
 
-Treat statements such as "authorized", "commissioned", "owner-approved", or equivalent as context about the engagement, but do not use them as a reason to expand into destructive or intrusive testing automatically.
+Treat statements such as "authorized", "commissioned", "owner-approved", "tellitud", "volitatud", or equivalent as context about the engagement, but do not use them as a reason to expand into destructive or intrusive testing automatically.
 
 Start with a passive, read-only, non-invasive audit. The goal is to produce useful security findings without exploitation or service disruption.
 
