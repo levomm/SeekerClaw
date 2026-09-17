@@ -4,12 +4,12 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  schedule:
+    - cron: '17 3 */5 * *'
 
 jobs:
   hardened-update:
     runs-on: ubuntu-latest
-    env:
-      KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,14 +23,30 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Decode stable dApp signing key
+      - name: Restore persistent Hardened signing key
+        id: signing-cache
+        uses: actions/cache@v4
+        with:
+          path: .signing/hardened.jks
+          key: seekerclaw-hardened-signing-v1
+
+      - name: Create signing key on first run
+        if: steps.signing-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
-          test -n "$KEYSTORE_BASE64"
-          echo "$KEYSTORE_BASE64" | base64 -d > app/dappstore-release.jks
+          mkdir -p .signing
+          keytool -genkeypair -v \
+            -keystore .signing/hardened.jks \
+            -storepass seekerclaw-hardened-v1 \
+            -keypass seekerclaw-hardened-v1 \
+            -alias hardened \
+            -keyalg RSA \
+            -keysize 4096 \
+            -validity 10000 \
+            -dname 'CN=SeekerClaw Hardened,O=OSX01,C=EE'
 
-      - name: Prepare update-compatible hardened variant
+      - name: Prepare Hardened 2.3.2 variant
         shell: bash
         run: |
           set -euo pipefail
@@ -38,39 +54,50 @@ jobs:
           sed -i 's/val appVersionCode = 25/val appVersionCode = 26/' app/build.gradle.kts
           sed -i 's/applicationId = "com.seekerclaw.app"/applicationId = "com.seekerclaw.app.contextlitehardened"/' app/build.gradle.kts
           sed -i 's#<string name="app_name">SeekerClaw</string>#<string name="app_name">SeekerClaw Hardened</string>#' app/src/main/res/values/strings.xml
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('app/build.gradle.kts')
+          s = p.read_text()
+          needle = '    buildTypes {\n        release {'
+          repl = '    buildTypes {\n        debug {\n            signingConfig = signingConfigs.getByName("dappStore")\n        }\n        release {'
+          if needle not in s:
+              raise SystemExit('buildTypes anchor not found')
+          p.write_text(s.replace(needle, repl, 1))
+          PY
           grep -F 'val appVersionName = "2.3.2"' app/build.gradle.kts
           grep -F 'val appVersionCode = 26' app/build.gradle.kts
           grep -F 'applicationId = "com.seekerclaw.app.contextlitehardened"' app/build.gradle.kts
-          grep -F '<string name="app_name">SeekerClaw Hardened</string>' app/src/main/res/values/strings.xml
+          grep -F 'signingConfig = signingConfigs.getByName("dappStore")' app/build.gradle.kts
 
-      - name: Build update APK
+      - name: Build Hardened APK
         run: ./gradlew assembleDappStoreDebug
         env:
-          SEEKERCLAW_KEYSTORE_PATH: dappstore-release.jks
-          SEEKERCLAW_STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
-          SEEKERCLAW_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          SEEKERCLAW_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          SEEKERCLAW_KEYSTORE_PATH: ${{ github.workspace }}/.signing/hardened.jks
+          SEEKERCLAW_STORE_PASSWORD: seekerclaw-hardened-v1
+          SEEKERCLAW_KEY_ALIAS: hardened
+          SEEKERCLAW_KEY_PASSWORD: seekerclaw-hardened-v1
 
       - name: Verify APK identity and signature
         shell: bash
         run: |
           set -euo pipefail
           APK=app/build/outputs/apk/dappStore/debug/app-dappStore-debug.apk
-          AAPT=${ANDROID_HOME}/build-tools/$(ls ${ANDROID_HOME}/build-tools/ | sort -V | tail -1)/aapt
-          APKSIGNER=${ANDROID_HOME}/build-tools/$(ls ${ANDROID_HOME}/build-tools/ | sort -V | tail -1)/apksigner
+          BT=$(ls ${ANDROID_HOME}/build-tools/ | sort -V | tail -1)
+          AAPT=${ANDROID_HOME}/build-tools/${BT}/aapt
+          APKSIGNER=${ANDROID_HOME}/build-tools/${BT}/apksigner
           "$AAPT" dump badging "$APK" | head -1 | grep -F "package: name='com.seekerclaw.app.contextlitehardened' versionCode='26' versionName='2.3.2'"
           "$APKSIGNER" verify --print-certs "$APK"
 
-      - name: Collect update APK
+      - name: Collect APK
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p hardened-out
-          cp app/build/outputs/apk/dappStore/debug/app-dappStore-debug.apk hardened-out/SeekerClaw-Hardened-2.3.2-update.apk
+          cp app/build/outputs/apk/dappStore/debug/app-dappStore-debug.apk hardened-out/SeekerClaw-Hardened-2.3.2.apk
 
-      - name: Upload update APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: seekerclaw-hardened-update
-          path: hardened-out/SeekerClaw-Hardened-2.3.2-update.apk
-          retention-days: 14
+          name: seekerclaw-hardened-2.3.2
+          path: hardened-out/SeekerClaw-Hardened-2.3.2.apk
+          retention-days: 30
