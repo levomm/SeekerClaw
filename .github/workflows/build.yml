@@ -101,6 +101,7 @@ jobs:
             telegram-systemplain \
             telegram-no-double-delivery \
             telegram-rich-send \
+            frantic-watcher \
             rich-messages-default \
             truncate-tool-result \
             web-fetch-redirect-headers \
