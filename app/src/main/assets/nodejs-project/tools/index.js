@@ -20,6 +20,7 @@ const solanaMod   = require('./solana');
 const telegramMod = CHANNEL === 'telegram' ? require('./telegram') : null;
 const systemMod   = require('./system');
 const envMod      = require('./env');
+const zohoMailMod = require('./zoho-mail');
 // BAT-582 Phase 4: wallet_status + wallet_set_caps
 const walletMod   = require('./wallet');
 // BAT-582 Phase 6: agent_pay (x402 client)
@@ -39,6 +40,7 @@ const TOOLS = [
     ...(telegramMod ? telegramMod.tools : []),
     ...systemMod.tools,
     ...envMod.tools,
+    ...zohoMailMod.tools,
     ...walletMod.tools,
     ...agentPayMod.tools,
 ];
@@ -57,6 +59,7 @@ const handlerMap = Object.assign({},
     ...(telegramMod ? [telegramMod.handlers] : []),
     systemMod.handlers,
     envMod.handlers,
+    zohoMailMod.handlers,
     walletMod.handlers,
     agentPayMod.handlers,
 );
