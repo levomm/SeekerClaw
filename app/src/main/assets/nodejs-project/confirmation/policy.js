@@ -255,6 +255,21 @@ function getConfirmationPolicy(toolName, args, walletState) {
 
     // ── Burner-specific overrides (always apply, regardless of v1.0 set) ─────
 
+    // Zoho Mail outbound actions are always user-confirmed. Reading/searching
+    // mail remains side-effect free and falls through to the normal "none" policy.
+    if (toolName === 'zoho_mail_send' || toolName === 'zoho_mail_reply') {
+        const action = toolName === 'zoho_mail_reply' ? 'Reply email' : 'Send email';
+        const to = _literalizeNewlines(String(a.to || '<missing recipient>'));
+        const subject = _literalizeNewlines(String(a.subject || ''));
+        let preview = _literalizeNewlines(String(a.content || ''));
+        if (preview.length > 200) preview = preview.slice(0, 187) + '… (truncated)';
+        return {
+            policy: 'confirm',
+            message: `${action}\nTo: ${to}\nSubject: ${subject}\nBody: ${preview || '<empty>'}`,
+        };
+    }
+
+
     // wallet_status is purely informational — never confirm.
     if (toolName === 'wallet_status') {
         return 'none';
