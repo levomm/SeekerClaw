@@ -16,8 +16,6 @@
 const fs = require('fs');
 const path = require('path');
 
-const { httpRequest } = require('./http');
-
 const HOST = 'gofrantic.com';
 const STATE_FILE = 'frantic_watcher_state.json';
 
@@ -100,6 +98,7 @@ async function request(method, apiPath, body = null, withAuth = false) {
     if (body != null) headers['Content-Type'] = 'application/json';
     if (withAuth && cfg.agentToken) headers.Authorization = `Bearer ${cfg.agentToken}`;
 
+    const { httpRequest } = require('./http');
     const res = await httpRequest({
         hostname: HOST,
         path: apiPath,
@@ -268,7 +267,7 @@ async function claimBounty(number, cb) {
         agent_kid: cfg.agentKid,
     }, true);
 
-    if (res.status === 200 && res.data?.ok === true) {
+    if (res.status >= 200 && res.status < 300 && res.data?.ok === true) {
         await removeKeyboard(cb);
         markSeen(number);
         const fuse = res.data.fuse_expires_at ? `\ndue: ${res.data.fuse_expires_at}` : '';
