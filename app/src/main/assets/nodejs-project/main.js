@@ -202,6 +202,7 @@ const {
 // ============================================================================
 
 const { handleQuickCommand, handleQuickCallback } = require('./quick-actions');
+const frantic = require('./frantic');
 
 // ============================================================================
 // WEB (extracted to web.js — BAT-196)
@@ -600,6 +601,12 @@ async function poll() {
                         if (!getOwnerId() || cbSenderId !== getOwnerId()) {
                             log(`[Callback] Ignoring callback from ${cbSenderId} (not owner)`, 'WARN');
                         } else {
+                            // Frantic watcher callbacks are app-authored and owner-only.
+                            // Handle them before generic/model-authored callback routing so
+                            // CLAIM/SKIP never become synthetic LLM messages.
+                            const franticHandled = await frantic.handleCallback(cb);
+                            if (franticHandled) continue;
+
                             // Quick Actions: route quick:* callbacks through dedicated handler
                             const quickText = await handleQuickCallback(cb, telegram);
                             // Synthetic message base — include message_id so reactions
@@ -881,6 +888,12 @@ telegram('getMe')
             }).catch(e => log(`setMyCommands error: ${e.message}`, 'WARN'));
 
             poll();
+            frantic.start({
+                workDir,
+                log,
+                telegram,
+                getOwnerChatId: () => channel.getOwnerChatId(),
+            });
             startClaudeUsagePolling();
 
             // P2.4b: Auto-resume fresh incomplete checkpoints after startup
@@ -1053,8 +1066,8 @@ telegram('getMe')
 // the next listener (this one), whose synchronous body completes
 // while gracefulShutdown's tail (saveDatabase + process.exit(0))
 // is still pending.
-process.on('SIGTERM', () => { try { channel.stop(); } catch (_) {} cancelAllIdleSummaries(); });
-process.on('SIGINT', () => { try { channel.stop(); } catch (_) {} cancelAllIdleSummaries(); });
+process.on('SIGTERM', () => { try { frantic.stop(); } catch (_) {} try { channel.stop(); } catch (_) {} cancelAllIdleSummaries(); });
+process.on('SIGINT', () => { try { frantic.stop(); } catch (_) {} try { channel.stop(); } catch (_) {} cancelAllIdleSummaries(); });
 
 // Runtime status log (uptime/memory debug, every 5 min)
 setInterval(() => {
