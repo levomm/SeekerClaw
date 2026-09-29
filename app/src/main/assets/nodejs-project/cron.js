@@ -56,6 +56,7 @@ const MIN_AGENT_TURN_INTERVAL_MS = 15 * 60 * 1000; // 15 min minimum for recurri
 const MAX_MISSED_JOBS_PER_RESTART = 5;   // Cap immediate catch-up on startup (OpenClaw parity: v2026.3.13)
 const MISSED_JOB_STAGGER_MS = 5000;      // 5s delay between deferred missed jobs
 const STARTUP_AGENT_TURN_GRACE_MS = 5 * 60 * 1000; // never fire overdue AI cron immediately after boot
+const STARTUP_AGENT_TURN_QUIET_WINDOW_MS = 5 * 60 * 1000; // also defer AI jobs scheduled shortly after boot
 
 // Transient error patterns — these errors are expected to resolve on retry (OpenClaw parity: v2026.3.13)
 const TRANSIENT_ERROR_RE = /\b(429|529|503)\b|rate[_ ]limit|too many requests|tokens per day|overloaded|high demand|capacity exceeded|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|socket hang up|fetch failed|timed?\s*out/i;
@@ -503,22 +504,23 @@ const cronService = {
     // window so startup, MCP reconnect, DB init and user traffic settle first.
     _staggerMissedJobs() {
         const now = Date.now();
-        const overdueAgentTurns = this.store.jobs.filter(j =>
+        const quietUntil = now + STARTUP_AGENT_TURN_QUIET_WINDOW_MS;
+        const startupAgentTurns = this.store.jobs.filter(j =>
             j.enabled &&
             j.payload?.kind === 'agentTurn' &&
             j.state.nextRunAtMs &&
-            j.state.nextRunAtMs <= now
+            j.state.nextRunAtMs < quietUntil
         ).sort((a, b) => a.state.nextRunAtMs - b.state.nextRunAtMs);
 
-        if (overdueAgentTurns.length === 0) return;
+        if (startupAgentTurns.length === 0) return;
 
         let offset = STARTUP_AGENT_TURN_GRACE_MS;
-        for (const job of overdueAgentTurns) {
+        for (const job of startupAgentTurns) {
             job.state.nextRunAtMs = now + offset;
             offset += MISSED_JOB_STAGGER_MS;
         }
 
-        log(`[Cron] Startup: deferred ${overdueAgentTurns.length} overdue AI job(s) by at least ${Math.round(STARTUP_AGENT_TURN_GRACE_MS / 60000)}min`, 'INFO');
+        log(`[Cron] Startup: deferred ${startupAgentTurns.length} near-boot AI job(s) by at least ${Math.round(STARTUP_AGENT_TURN_GRACE_MS / 60000)}min`, 'INFO');
         saveCronStore(this.store);
     },
 
