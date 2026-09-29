@@ -38,6 +38,8 @@ const deferStatus = CHANNEL === 'telegram' ? require('./telegram').deferStatus :
 const deferThinkingStatus = CHANNEL === 'telegram' ? require('./telegram').deferThinkingStatus : () => ({ cleanup: async () => {} });
 const { httpStreamingRequest, httpOpenAIStreamingRequest, httpChatCompletionsStreamingRequest } = require('./http');
 const { getAdapter } = require('./providers');
+const { resetDiscoveredToolsForChat } = require('./deferred-tools');
+const { compactStablePrompt } = require('./prompt-compact');
 const { androidBridgeCall } = require('./bridge');
 const { stripSilentReply, TOKEN: SILENT_REPLY_TOKEN } = require('./silent-reply');
 
@@ -1564,7 +1566,12 @@ function buildSystemBlocks(matchedSkills = [], chatId = null, activeModel = MODE
         }
     }
 
-    const stablePrompt = lines.join('\n') + '\n';
+    const rawStablePrompt = lines.join('\n') + '\n';
+    const compacted = compactStablePrompt(rawStablePrompt);
+    const stablePrompt = compacted.prompt;
+    if (compacted.savedChars > 0) {
+        log(`[ContextBudget] compactedStable savedChars=${compacted.savedChars} sections=${compacted.replacedSections.length}`, 'DEBUG');
+    }
 
     // Dynamic block — changes every call, must NOT be cached
     const dynamicLines = [];
@@ -1641,7 +1648,27 @@ function buildSystemBlocks(matchedSkills = [], chatId = null, activeModel = MODE
         }
     }
 
-    return { stable: stablePrompt, dynamic: dynamicLines.join('\n') };
+    const dynamicPrompt = dynamicLines.join('\n');
+    return {
+        stable: stablePrompt,
+        dynamic: dynamicPrompt,
+        diagnostics: {
+            identityChars: identity ? identity.length : 0,
+            userChars: user ? user.length : 0,
+            soulChars: soul ? soul.length : 0,
+            memoryFileChars: memory ? memory.length : 0,
+            memoryInjectedChars: (!leanMemory && memory) ? Math.min(memory.length, 3000) : 0,
+            dailyMemoryFileChars: dailyMemory ? dailyMemory.length : 0,
+            dailyMemoryInjectedChars: (!leanMemory && dailyMemory) ? Math.min(dailyMemory.length, 1500) : 0,
+            skillCount: allSkills.length,
+            stablePromptChars: stablePrompt.length,
+            rawStablePromptChars: rawStablePrompt.length,
+            compactSavedChars: compacted.savedChars,
+            compactedSections: compacted.replacedSections.length,
+            dynamicPromptChars: dynamicPrompt.length,
+            leanMemory: !!leanMemory,
+        },
+    };
 }
 
 // BAT-315: Provider-agnostic usage reporting
@@ -2657,6 +2684,16 @@ async function chat(chatId, userMessage, options = {}) {
     // BAT-243: Generate unique turn ID for correlating all API calls in this turn
     const turnId = crypto.randomBytes(4).toString('hex');
 
+    // Context Lite v2: discoveries are scratch state for ONE user turn.
+    // Keep persistent memory/checkpoints untouched. Resume turns retain discovery
+    // state when still available, while fresh turns start from the 6 core tools.
+    if (!options.isResume) {
+        const cleared = resetDiscoveredToolsForChat(chatId);
+        if (cleared) {
+            log(`[ContextBudget] turnId=${turnId} clearedDeferredTools chatId=${String(chatId)}`, 'DEBUG');
+        }
+    }
+
     // P2.4: Generate taskId for this turn (used for resume tracking)
     const taskId = crypto.randomBytes(8).toString('hex');
     setActiveTask(chatId, taskId);
@@ -2694,7 +2731,11 @@ async function chat(chatId, userMessage, options = {}) {
     // name out of its own system prompt.
     const activeModel = resolveActiveModel();
 
-    const { stable: stablePrompt, dynamic: dynamicPrompt } = buildSystemBlocks(matchedSkills, chatId, activeModel);
+    const {
+        stable: stablePrompt,
+        dynamic: dynamicPrompt,
+        diagnostics: promptDiagnostics,
+    } = buildSystemBlocks(matchedSkills, chatId, activeModel);
 
     // P2.4: Resume directive — injected as a high-priority system block so Claude
     // cannot ignore it. User messages are suggestions; system directives are orders.
@@ -2841,7 +2882,7 @@ async function chat(chatId, userMessage, options = {}) {
             // can't handle tool_search discovery pattern (leak raw XML instead of proper calls).
             // Re-enable per-model when we can detect tool-use capability from OpenRouter API.
             const rawTools = _loopFinalIteration ? [] : (_deps.getTools ? _deps.getTools() : []);
-            const formattedTools = adapter.formatTools(rawTools);
+            const formattedTools = adapter.formatTools(rawTools, chatId);
 
             // Context token estimation: check usage before API call, adaptively trim if needed.
             // Cache systemChars for the turn (stable). toolChars recomputed each iteration
@@ -2854,6 +2895,30 @@ async function chat(chatId, userMessage, options = {}) {
             // DeerFlow P2: Summarize old messages before adaptive trim drops them.
             // Reuse ctx for both summarization check and trim check to avoid duplicate logging.
             let ctx = checkContextUsage(systemBlocks, messages, formattedTools, activeModel, turnId, _ctxCache);
+            log(`[ContextBudget] ${JSON.stringify({
+                turnId,
+                chatId: String(chatId || ''),
+                iteration: stepCount,
+                estimatedTokens: ctx.estimatedTokens,
+                systemTokens: ctx.breakdown.system,
+                messageTokens: ctx.breakdown.messages,
+                toolTokens: ctx.breakdown.tools,
+                toolCount: formattedTools.length,
+                messageCount: messages.length,
+                identityChars: promptDiagnostics?.identityChars || 0,
+                userChars: promptDiagnostics?.userChars || 0,
+                soulChars: promptDiagnostics?.soulChars || 0,
+                memoryFileChars: promptDiagnostics?.memoryFileChars || 0,
+                memoryInjectedChars: promptDiagnostics?.memoryInjectedChars || 0,
+                dailyMemoryFileChars: promptDiagnostics?.dailyMemoryFileChars || 0,
+                dailyMemoryInjectedChars: promptDiagnostics?.dailyMemoryInjectedChars || 0,
+                skillCount: promptDiagnostics?.skillCount || 0,
+                stablePromptChars: promptDiagnostics?.stablePromptChars || 0,
+                rawStablePromptChars: promptDiagnostics?.rawStablePromptChars || 0,
+                compactSavedChars: promptDiagnostics?.compactSavedChars || 0,
+                compactedSections: promptDiagnostics?.compactedSections || 0,
+                dynamicPromptChars: promptDiagnostics?.dynamicPromptChars || 0,
+            })}`, 'INFO');
             if (ctx.usage >= CONTEXT_SUMMARIZE_THRESHOLD && !_summarizedThisTurn.has(chatId)) {
                 const summarized = await summarizeOldMessages(messages, chatId, turnId, activeModel, _turnAnchor);
                 if (summarized) {
