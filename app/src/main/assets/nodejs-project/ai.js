@@ -39,6 +39,7 @@ const deferThinkingStatus = CHANNEL === 'telegram' ? require('./telegram').defer
 const { httpStreamingRequest, httpOpenAIStreamingRequest, httpChatCompletionsStreamingRequest } = require('./http');
 const { getAdapter } = require('./providers');
 const { resetDiscoveredToolsForChat } = require('./deferred-tools');
+const { compactStablePrompt } = require('./prompt-compact');
 const { androidBridgeCall } = require('./bridge');
 const { stripSilentReply, TOKEN: SILENT_REPLY_TOKEN } = require('./silent-reply');
 
@@ -1565,7 +1566,12 @@ function buildSystemBlocks(matchedSkills = [], chatId = null, activeModel = MODE
         }
     }
 
-    const stablePrompt = lines.join('\n') + '\n';
+    const rawStablePrompt = lines.join('\n') + '\n';
+    const compacted = compactStablePrompt(rawStablePrompt);
+    const stablePrompt = compacted.prompt;
+    if (compacted.savedChars > 0) {
+        log(`[ContextBudget] compactedStable savedChars=${compacted.savedChars} sections=${compacted.replacedSections.length}`, 'DEBUG');
+    }
 
     // Dynamic block — changes every call, must NOT be cached
     const dynamicLines = [];
@@ -1656,6 +1662,9 @@ function buildSystemBlocks(matchedSkills = [], chatId = null, activeModel = MODE
             dailyMemoryInjectedChars: (!leanMemory && dailyMemory) ? Math.min(dailyMemory.length, 1500) : 0,
             skillCount: allSkills.length,
             stablePromptChars: stablePrompt.length,
+            rawStablePromptChars: rawStablePrompt.length,
+            compactSavedChars: compacted.savedChars,
+            compactedSections: compacted.replacedSections.length,
             dynamicPromptChars: dynamicPrompt.length,
             leanMemory: !!leanMemory,
         },
@@ -2905,6 +2914,9 @@ async function chat(chatId, userMessage, options = {}) {
                 dailyMemoryInjectedChars: promptDiagnostics?.dailyMemoryInjectedChars || 0,
                 skillCount: promptDiagnostics?.skillCount || 0,
                 stablePromptChars: promptDiagnostics?.stablePromptChars || 0,
+                rawStablePromptChars: promptDiagnostics?.rawStablePromptChars || 0,
+                compactSavedChars: promptDiagnostics?.compactSavedChars || 0,
+                compactedSections: promptDiagnostics?.compactedSections || 0,
                 dynamicPromptChars: promptDiagnostics?.dynamicPromptChars || 0,
             })}`, 'INFO');
             if (ctx.usage >= CONTEXT_SUMMARIZE_THRESHOLD && !_summarizedThisTurn.has(chatId)) {
