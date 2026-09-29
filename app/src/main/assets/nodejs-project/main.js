@@ -159,6 +159,12 @@ const {
 const {
     setSendMessage, setGetOwnerChatId, setRunAgentTurn, cronService,
 } = require('./cron');
+const {
+    configureUsageLimitGuard,
+    getUsageLimitState,
+} = require('./usage-limit-guard');
+
+configureUsageLimitGuard({ workDir, logFn: log });
 
 // ============================================================================
 // DATABASE (extracted to database.js — BAT-202)
@@ -359,6 +365,12 @@ const AUTO_RESUME_MAX_ATTEMPTS = 2;            // Give up after 2 auto-resume at
  * to auto-resume. Older checkpoints require manual /resume.
  */
 async function autoResumeOnStartup() {
+    const usageState = getUsageLimitState();
+    if (usageState.active) {
+        log(`[AutoResume] Skipping startup resume during usage cooldown (${Math.ceil(usageState.remainingMs / 60000)}min remaining)`, 'WARN');
+        return;
+    }
+
     try {
         const allCheckpoints = listCheckpoints();
         const incomplete = allCheckpoints.filter(cp => !cp.complete);
@@ -1159,6 +1171,12 @@ let isHeartbeatInFlight = false;
 let lastHeartbeatAt = Date.now();
 
 async function runHeartbeat() {
+    const usageState = getUsageLimitState();
+    if (usageState.active) {
+        log(`[Heartbeat] Skipping AI probe during usage cooldown (${Math.ceil(usageState.remainingMs / 60000)}min remaining)`, 'DEBUG');
+        return;
+    }
+
     // BAT-1155 Codex re-review blocker: skip heartbeat-triggered turns while quiesced for a
     // controlled Stop — a heartbeat turn could otherwise start work (and a token rotation)
     // after the durability acknowledgement and before the process kill.
