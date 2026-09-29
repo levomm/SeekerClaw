@@ -25,19 +25,36 @@ function usesDeferredToolLoading(providerId) {
     return DEFERRED_PROVIDERS.has(String(providerId || '').toLowerCase());
 }
 
-function getDiscoveredToolNames() {
+function getDiscoveredToolNames(chatId = null) {
     const map = global._discoveredToolsByChat;
     if (!(map instanceof Map) || map.size === 0) return new Set();
 
-    // The normal path has one active owner/chat. If a cron/background turn is
-    // concurrent, union the discovered sets. That may expose a few extra schemas
-    // for one round, but never removes a capability or crosses any execution gate.
+    // Keep discoveries isolated per chat/cron session. The previous implementation
+    // unioned every chat's discoveries, so a background cron turn could silently
+    // inflate an unrelated Telegram request with extra tool schemas.
+    if (chatId !== null && chatId !== undefined) {
+        const direct = map.get(chatId) || map.get(String(chatId));
+        if (!direct || typeof direct[Symbol.iterator] !== 'function') return new Set();
+        return new Set(direct);
+    }
+
+    // Backward-compatible fallback for callers/tests that do not supply a chat id.
     const out = new Set();
     for (const names of map.values()) {
         if (!names || typeof names[Symbol.iterator] !== 'function') continue;
         for (const name of names) out.add(name);
     }
     return out;
+}
+
+function resetDiscoveredToolsForChat(chatId) {
+    const map = global._discoveredToolsByChat;
+    if (!(map instanceof Map)) return false;
+
+    let removed = map.delete(chatId);
+    const stringId = String(chatId);
+    if (!removed && stringId !== chatId) removed = map.delete(stringId);
+    return removed;
 }
 
 function selectDeferredTools(rawTools, discoveredToolNames = getDiscoveredToolNames()) {
@@ -58,8 +75,8 @@ function wrapFormatTools(adapter) {
     if (typeof adapter.formatTools !== 'function') return adapter;
 
     const originalFormatTools = adapter.formatTools.bind(adapter);
-    adapter.formatTools = (rawTools) => {
-        const selected = selectDeferredTools(rawTools);
+    adapter.formatTools = (rawTools, chatId = null) => {
+        const selected = selectDeferredTools(rawTools, getDiscoveredToolNames(chatId));
         return originalFormatTools(selected);
     };
     Object.defineProperty(adapter, '__contextLiteWrapped', {
@@ -76,6 +93,7 @@ module.exports = {
     DEFERRED_PROVIDERS,
     usesDeferredToolLoading,
     getDiscoveredToolNames,
+    resetDiscoveredToolsForChat,
     selectDeferredTools,
     wrapFormatTools,
 };
