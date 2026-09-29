@@ -37,6 +37,32 @@ assert.strictEqual(usesDeferredToolLoading('custom'), true);
 assert.strictEqual(usesDeferredToolLoading('claude'), false);
 assert.strictEqual(usesDeferredToolLoading('openrouter'), false);
 
+global._discoveredToolsByChat = new Map([
+    ['tg:owner', new Set(['android_call'])],
+    ['cron:frantic', new Set(['solana_swap'])],
+]);
+assert.deepStrictEqual(
+    getDiscoveredToolNames('tg:owner'),
+    new Set(['android_call']),
+    'Telegram discovery must not inherit cron-discovered tools'
+);
+assert.deepStrictEqual(
+    getDiscoveredToolNames('cron:frantic'),
+    new Set(['solana_swap']),
+    'cron discovery must stay isolated from Telegram'
+);
+assert.strictEqual(resetDiscoveredToolsForChat('tg:owner'), true);
+assert.deepStrictEqual(
+    getDiscoveredToolNames('tg:owner'),
+    new Set(),
+    'fresh user turn must clear only that chat scratch state'
+);
+assert.deepStrictEqual(
+    getDiscoveredToolNames('cron:frantic'),
+    new Set(['solana_swap']),
+    'clearing Telegram scratch must not erase another session'
+);
+
 const adapter = {
     id: 'openai',
     formatTools(tools) { return tools.map(t => t.name); },
