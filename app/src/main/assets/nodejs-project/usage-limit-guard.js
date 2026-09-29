@@ -57,12 +57,18 @@ function _persist() {
 
 function activateUsageLimitCooldown(reason = 'usage_limit_reached', nowMs = Date.now(), durationMs = _cooldownMs) {
     const duration = Number.isFinite(durationMs) && durationMs >= 60000 ? durationMs : _cooldownMs;
-    const nextUntil = nowMs + duration;
-    const extended = nextUntil > _untilMs;
-    _untilMs = Math.max(_untilMs, nextUntil);
+    const alreadyActive = _untilMs > nowMs;
+    const nextUntil = alreadyActive ? _untilMs : nowMs + duration;
+    _untilMs = nextUntil;
     _reason = reason || 'usage_limit_reached';
     _persist();
-    return { active: true, untilMs: _untilMs, remainingMs: Math.max(0, _untilMs - nowMs), extended, reason: _reason };
+    return {
+        active: true,
+        untilMs: _untilMs,
+        remainingMs: Math.max(0, _untilMs - nowMs),
+        extended: !alreadyActive,
+        reason: _reason,
+    };
 }
 
 function getUsageLimitState(nowMs = Date.now()) {
