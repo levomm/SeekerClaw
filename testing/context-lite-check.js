@@ -121,4 +121,31 @@ assert.ok(
     'error-recovery manual should be replaced by compact guidance'
 );
 
+const secondaryFixture = [
+    '## Diagnostics',
+    'huge diagnostics manual',
+    '## Heartbeats',
+    'huge heartbeat manual',
+    '## Session Memory',
+    'huge session memory manual',
+    '## Project Context',
+    '## MEMORY.md',
+    'memory-v3-keep-me-exactly',
+].join('\n');
+
+const secondaryCompacted = compactStablePrompt(secondaryFixture);
+assert.ok(
+    secondaryCompacted.replacedSections.includes('## Diagnostics')
+        && secondaryCompacted.replacedSections.includes('## Heartbeats')
+        && secondaryCompacted.replacedSections.includes('## Session Memory'),
+    'secondary static manuals should be compacted'
+);
+assert.ok(
+    secondaryCompacted.prompt.includes('## MEMORY.md\nmemory-v3-keep-me-exactly'),
+    'secondary compaction must preserve persistent memory content'
+);
+assert.ok(!secondaryCompacted.prompt.includes('huge diagnostics manual'));
+assert.ok(!secondaryCompacted.prompt.includes('huge heartbeat manual'));
+assert.ok(!secondaryCompacted.prompt.includes('huge session memory manual'));
+
 console.log('context-lite-check: PASS');
