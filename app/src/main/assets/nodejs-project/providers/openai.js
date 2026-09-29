@@ -455,8 +455,21 @@ function classifyError(status, data) {
         };
     }
     if (status === 429) {
-        const msg = data?.error?.message || '';
-        if (/quota|insufficient_quota/i.test(msg)) {
+        const err = data?.error;
+        const msg = typeof err === 'string' ? err : (err?.message || data?.message || '');
+        const code = typeof err === 'object' ? (err?.code || data?.code || '') : (data?.code || '');
+        const type = typeof err === 'object' ? (err?.type || '') : '';
+
+        // ChatGPT/Codex OAuth can return usage_limit_reached when the account's
+        // usage allowance is exhausted. Retrying the identical 10k+ token payload
+        // three more times cannot recover it and only creates a retry storm.
+        if (/usage_limit_reached/i.test(type) || /usage_limit_reached/i.test(code) || /usage limit/i.test(msg)) {
+            return {
+                type: 'usage_limit', retryable: false,
+                userMessage: 'OpenAI usage limit reached. Background AI turns are paused temporarily.'
+            };
+        }
+        if (/quota|insufficient_quota/i.test(msg) || /insufficient_quota/i.test(code)) {
             return {
                 type: 'quota', retryable: false,
                 userMessage: 'OpenAI quota exceeded. Check your billing at platform.openai.com'
