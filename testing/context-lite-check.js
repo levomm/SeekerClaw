@@ -9,6 +9,7 @@ const {
     selectDeferredTools,
     wrapFormatTools,
 } = require('../app/src/main/assets/nodejs-project/deferred-tools');
+const { compactStablePrompt } = require('../app/src/main/assets/nodejs-project/prompt-compact');
 
 const sample = [
     { name: 'read' },
@@ -86,6 +87,37 @@ assert.deepStrictEqual(
     openRouterAdapter.formatTools(sample),
     sample.map(t => t.name),
     'OpenRouter must keep the full toolset until model capability detection is reliable'
+);
+
+const promptFixture = [
+    '## Tooling',
+    'very long tooling manual line 1',
+    'very long tooling manual line 2',
+    '### Burner policy (BAT-1013)',
+    'very long burner details',
+    '## Project Context',
+    '## MEMORY.md',
+    'remember-this-exactly',
+    '## Error Recovery',
+    'very long recovery manual',
+].join('\n');
+
+const compactedFixture = compactStablePrompt(promptFixture);
+assert.ok(
+    compactedFixture.prompt.length < promptFixture.length,
+    'compact profile should reduce static prompt size'
+);
+assert.ok(
+    compactedFixture.prompt.includes('## MEMORY.md\nremember-this-exactly'),
+    'prompt compaction must preserve MEMORY.md content byte-for-byte'
+);
+assert.ok(
+    !compactedFixture.prompt.includes('very long burner details'),
+    'nested tooling/burner manual should be replaced by compact guidance'
+);
+assert.ok(
+    !compactedFixture.prompt.includes('very long recovery manual'),
+    'error-recovery manual should be replaced by compact guidance'
 );
 
 console.log('context-lite-check: PASS');
