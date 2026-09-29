@@ -4,6 +4,8 @@ const assert = require('assert');
 const {
     CORE_TOOL_NAMES,
     usesDeferredToolLoading,
+    getDiscoveredToolNames,
+    resetDiscoveredToolsForChat,
     selectDeferredTools,
     wrapFormatTools,
 } = require('../app/src/main/assets/nodejs-project/deferred-tools');
