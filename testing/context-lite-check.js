@@ -104,8 +104,9 @@ const promptFixture = [
 
 const compactedFixture = compactStablePrompt(promptFixture);
 assert.ok(
-    compactedFixture.prompt.length < promptFixture.length,
-    'compact profile should reduce static prompt size'
+    compactedFixture.replacedSections.includes('## Tooling')
+        && compactedFixture.replacedSections.includes('## Error Recovery'),
+    'compact profile should replace the selected static manual sections'
 );
 assert.ok(
     compactedFixture.prompt.includes('## MEMORY.md\nremember-this-exactly'),
