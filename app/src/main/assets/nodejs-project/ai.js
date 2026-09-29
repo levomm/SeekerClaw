@@ -2674,10 +2674,16 @@ async function summarizeOldMessages(messages, chatId, turnId, modelOverride, anc
 const AGING_RECENCY_THRESHOLD = 6;  // messages within this distance from end are "recent"
 const AGING_SIZE_THRESHOLD = 800;   // chars — only age results larger than this
 
-function ageToolResults(messages, turnId) {
+function ageToolResults(messages, turnId, options = {}) {
     let aged = 0;
     let bytesSaved = 0;
-    const recentBoundary = messages.length - AGING_RECENCY_THRESHOLD;
+    const recencyThreshold = Number.isFinite(options.recencyThreshold)
+        ? Math.max(0, options.recencyThreshold)
+        : AGING_RECENCY_THRESHOLD;
+    const sizeThreshold = Number.isFinite(options.sizeThreshold)
+        ? Math.max(0, options.sizeThreshold)
+        : AGING_SIZE_THRESHOLD;
+    const recentBoundary = messages.length - recencyThreshold;
 
     for (let i = 0; i < recentBoundary; i++) {
         const msg = messages[i];
@@ -2685,7 +2691,7 @@ function ageToolResults(messages, turnId) {
         if (msg.role !== 'tool') continue;
 
         const contentLen = typeof msg.content === 'string' ? msg.content.length : 0;
-        if (contentLen <= AGING_SIZE_THRESHOLD) continue;
+        if (contentLen <= sizeThreshold) continue;
 
         // Resolve tool name from preceding assistant message's toolCalls
         let toolName = 'unknown';
@@ -2727,6 +2733,7 @@ async function chat(chatId, userMessage, options = {}) {
 
     // BAT-243: Generate unique turn ID for correlating all API calls in this turn
     const turnId = crypto.randomBytes(4).toString('hex');
+    const isBackgroundBudget = options.backgroundBudget === true;
 
     // Context Lite v2: discoveries are scratch state for ONE user turn.
     // Keep persistent memory/checkpoints untouched. Resume turns retain discovery
@@ -2891,7 +2898,7 @@ async function chat(chatId, userMessage, options = {}) {
     // Settings change takes effect on the next chat() call (no service restart).
     // Mirrors getHeartbeatIntervalMs() in main.js. Clamped to [10, 100]; invalid
     // or missing values fall back to config.maxStepsPerTurn, then 35.
-    const MAX_STEPS = (() => {
+    const configuredMaxSteps = (() => {
         try {
             const settingsPath = path.join(workDir, 'agent_settings.json');
             if (fs.existsSync(settingsPath)) {
@@ -2903,6 +2910,16 @@ async function chat(chatId, userMessage, options = {}) {
         const fallback = parseInt(_config && _config.maxStepsPerTurn, 10);
         return (fallback >= 10 && fallback <= 100) ? fallback : 35;
     })();
+    const requestedBackgroundSteps = parseInt(options.backgroundMaxSteps, 10);
+    const backgroundMaxSteps = Number.isFinite(requestedBackgroundSteps)
+        ? Math.max(1, Math.min(requestedBackgroundSteps, 6))
+        : 4;
+    const MAX_STEPS = isBackgroundBudget
+        ? Math.min(configuredMaxSteps, backgroundMaxSteps)
+        : configuredMaxSteps;
+    if (isBackgroundBudget) {
+        log(`[BackgroundBudget] turnId=${turnId} maxSteps=${MAX_STEPS} toolSearchMax=1 aggressiveAging=true`, 'INFO');
+    }
     // NOTE: `activeModel` was already resolved above (before buildSystemBlocks)
     // so the system prompt and the API request agree on the model. Don't
     // re-resolve here — a mid-turn switch would mean the request goes to a
@@ -2911,12 +2928,17 @@ async function chat(chatId, userMessage, options = {}) {
     let _loopWarned = false;  // DeerFlow P1: loop detector flags
     let _loopBroken = false;
     let _loopFinalIteration = false;
+    let _backgroundToolSearchUsed = false;
 
     try { // BAT-253: catch network errors → sanitize before user output
 
         while (stepCount < MAX_STEPS) {
             // BAT-259: Age old tool results to reduce payload bloat
-            ageToolResults(messages, turnId);
+            ageToolResults(
+                messages,
+                turnId,
+                isBackgroundBudget ? { recencyThreshold: 2, sizeThreshold: 400 } : {}
+            );
 
             // BAT-315: Provider-agnostic tool formatting + request body building
             // DeerFlow P1: Strip tools on loop-break final iteration so model can only respond with text
@@ -3510,6 +3532,23 @@ async function chat(chatId, userMessage, options = {}) {
                 // (prevents whitespace-padded names from bypassing confirmation/rate-limit gates)
                 if (typeof toolUse.name === 'string') toolUse.name = toolUse.name.trim();
                 log(`Tool use: ${toolUse.name}`, 'DEBUG');
+
+                if (isBackgroundBudget && toolUse.name === 'tool_search') {
+                    if (_backgroundToolSearchUsed) {
+                        toolResults.push({
+                            role: 'tool',
+                            toolCallId: toolUse.id,
+                            content: JSON.stringify({
+                                error: 'Background tool discovery budget exhausted for this turn.',
+                                hint: 'Use one of the tools already discovered or finish with the information available.',
+                            }),
+                        });
+                        log(`[BackgroundBudget] turnId=${turnId} blocked repeated tool_search at step=${stepCount}`, 'WARN');
+                        continue;
+                    }
+                    _backgroundToolSearchUsed = true;
+                }
+
                 // Status reaction: show tool-specific emoji (OpenClaw parity)
                 if (options.statusReaction) options.statusReaction.setTool(toolUse.name);
                 let result;
@@ -3748,6 +3787,11 @@ async function chat(chatId, userMessage, options = {}) {
 
         // Budget exhaustion explicit handling
         if (stepCount >= MAX_STEPS) {
+            if (isBackgroundBudget) {
+                log(`[BackgroundBudget] turnId=${turnId} exhausted at ${stepCount}/${MAX_STEPS}; returning SILENT_REPLY`, 'WARN');
+                return 'SILENT_REPLY';
+            }
+
             // P2.4: Track exhaustion reason in activeTask
             const task = getActiveTask(chatId);
             if (task) {
