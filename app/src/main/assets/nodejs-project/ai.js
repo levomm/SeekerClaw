@@ -43,6 +43,7 @@ const { compactStablePrompt } = require('./prompt-compact');
 const {
     activateUsageLimitCooldown,
     clearUsageLimitCooldown,
+    getUsageLimitState,
 } = require('./usage-limit-guard');
 const { androidBridgeCall } = require('./bridge');
 const { stripSilentReply, TOKEN: SILENT_REPLY_TOKEN } = require('./silent-reply');
@@ -1737,6 +1738,28 @@ function classifyNetworkError(err) {
 }
 
 async function claudeApiCall(body, chatId, traceCtx = {}) {
+    const { turnId, iteration, background } = traceCtx;
+
+    // Background work never probes a known-exhausted account. Foreground user
+    // turns are still allowed through so a manual message can detect recovery.
+    if (background) {
+        const usageState = getUsageLimitState();
+        if (usageState.active) {
+            log(`[UsageGuard] Skipping background API call chatId=${String(chatId || '')} remaining=${Math.ceil(usageState.remainingMs / 60000)}min`, 'DEBUG');
+            return {
+                status: 429,
+                headers: {},
+                data: {
+                    error: {
+                        type: 'usage_limit_reached',
+                        code: 'usage_limit_reached',
+                        message: 'Background AI paused during usage-limit cooldown',
+                    },
+                },
+            };
+        }
+    }
+
     // Serialize: wait for any in-flight API call to complete first
     while (apiCallInFlight) {
         await apiCallInFlight;
@@ -1777,7 +1800,6 @@ async function claudeApiCall(body, chatId, traceCtx = {}) {
     let timeoutRetries = 0; // BAT-245: separate counter for transport timeout retries
 
     // BAT-243: Extract trace metadata from traceCtx and derive payload stats from body for structured logging
-    const { turnId, iteration, background } = traceCtx;
     let payloadSize = 0;
     let toolCount = 0;
     if (turnId) {
