@@ -1120,7 +1120,12 @@ async function runCronAgentTurn(message, jobId) {
 
     try {
         const prompt = `[cron:${jobId}] ${message}\n\nCurrent time: ${localTimestamp()}`;
-        const response = await chat(cronChatId, prompt);
+        const response = await chat(cronChatId, prompt, {
+            backgroundBudget: true,
+            backgroundMaxSteps: 4,
+            reasoningMode: 'off',
+            synthetic: 'cron',
+        });
 
         // Strip protocol tokens (same pattern as heartbeat probe)
         const cleaned = stripSilentReply(
