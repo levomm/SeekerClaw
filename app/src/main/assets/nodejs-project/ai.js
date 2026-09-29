@@ -40,6 +40,10 @@ const { httpStreamingRequest, httpOpenAIStreamingRequest, httpChatCompletionsStr
 const { getAdapter } = require('./providers');
 const { resetDiscoveredToolsForChat } = require('./deferred-tools');
 const { compactStablePrompt } = require('./prompt-compact');
+const {
+    activateUsageLimitCooldown,
+    clearUsageLimitCooldown,
+} = require('./usage-limit-guard');
 const { androidBridgeCall } = require('./bridge');
 const { stripSilentReply, TOKEN: SILENT_REPLY_TOKEN } = require('./silent-reply');
 
@@ -2006,6 +2010,8 @@ async function claudeApiCall(body, chatId, traceCtx = {}) {
 
         // Report usage metrics + cache status + health state
         if (res.status === 200) {
+            // A successful inference proves the usage-limit condition has recovered.
+            clearUsageLimitCooldown();
             reportUsage(rawUsage);
             // BAT-1143 D8: a 200 proves the account can reach the model — clear the
             // xAI tier-gate breaker (the "recovered" signal). No-op for other providers.
@@ -2032,6 +2038,10 @@ async function claudeApiCall(body, chatId, traceCtx = {}) {
             }
         } else {
             const errClass = classifyApiError(res.status, res.data);
+            if (errClass.type === 'usage_limit') {
+                const state = activateUsageLimitCooldown('usage_limit_reached');
+                log(`[UsageGuard] OpenAI usage limit reached — background AI paused for ${Math.ceil(state.remainingMs / 60000)}min`, 'WARN');
+            }
             if (!background) updateAgentHealth('error', { type: errClass.type, status: res.status, message: errClass.userMessage });
 
             // BAT-1143 D10: session-expiry accounting. The OLD code incremented
@@ -3146,7 +3156,11 @@ async function chat(chatId, userMessage, options = {}) {
 
             let res;
             try {
-                res = await claudeApiCall(body, chatId, { turnId, iteration: stepCount });
+                res = await claudeApiCall(body, chatId, {
+                    turnId,
+                    iteration: stepCount,
+                    background: effectiveSynthetic === 'heartbeat' || String(chatId).startsWith('cron:'),
+                });
             } finally {
                 // Codex v3/v4 sign-off adjustment: cleanup is
                 // fire-and-forget. Awaiting it inline would gate
