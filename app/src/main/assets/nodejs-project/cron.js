@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 
 const { workDir, log, localTimestamp, getOwnerId } = require('./config');
+const { getUsageLimitState } = require('./usage-limit-guard');
 const { flattenForLog } = require('./log-safe');
 
 // ============================================================================
@@ -54,6 +55,7 @@ const AGENT_TURN_TIMEOUT_MS = 300000; // 5 min timeout for agentTurn (full AI tu
 const MIN_AGENT_TURN_INTERVAL_MS = 15 * 60 * 1000; // 15 min minimum for recurring agentTurn jobs
 const MAX_MISSED_JOBS_PER_RESTART = 5;   // Cap immediate catch-up on startup (OpenClaw parity: v2026.3.13)
 const MISSED_JOB_STAGGER_MS = 5000;      // 5s delay between deferred missed jobs
+const STARTUP_AGENT_TURN_GRACE_MS = 5 * 60 * 1000; // never fire overdue AI cron immediately after boot
 
 // Transient error patterns — these errors are expected to resolve on retry (OpenClaw parity: v2026.3.13)
 const TRANSIENT_ERROR_RE = /\b(429|529|503)\b|rate[_ ]limit|too many requests|tokens per day|overloaded|high demand|capacity exceeded|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|socket hang up|fetch failed|timed?\s*out/i;
@@ -496,28 +498,27 @@ const cronService = {
         saveCronStore(this.store);
     },
 
-    // OpenClaw parity (v2026.3.13): Cap and stagger missed jobs on startup
-    // to prevent overwhelming the API when many jobs are overdue after a long restart.
+    // Never let overdue AI jobs fire immediately on process start. Reminders are
+    // cheap/local and may still run immediately; agentTurn jobs get a boot grace
+    // window so startup, MCP reconnect, DB init and user traffic settle first.
     _staggerMissedJobs() {
         const now = Date.now();
-        const dueJobs = this.store.jobs.filter(j =>
+        const overdueAgentTurns = this.store.jobs.filter(j =>
             j.enabled &&
+            j.payload?.kind === 'agentTurn' &&
             j.state.nextRunAtMs &&
             j.state.nextRunAtMs <= now
         ).sort((a, b) => a.state.nextRunAtMs - b.state.nextRunAtMs);
 
-        if (dueJobs.length <= MAX_MISSED_JOBS_PER_RESTART) return;
+        if (overdueAgentTurns.length === 0) return;
 
-        // First MAX_MISSED_JOBS_PER_RESTART run immediately (already due),
-        // stagger the rest by MISSED_JOB_STAGGER_MS intervals
-        const deferred = dueJobs.slice(MAX_MISSED_JOBS_PER_RESTART);
-        let offset = MISSED_JOB_STAGGER_MS;
-        for (const job of deferred) {
+        let offset = STARTUP_AGENT_TURN_GRACE_MS;
+        for (const job of overdueAgentTurns) {
             job.state.nextRunAtMs = now + offset;
             offset += MISSED_JOB_STAGGER_MS;
         }
 
-        log(`[Cron] Startup: ${dueJobs.length} missed jobs — running ${MAX_MISSED_JOBS_PER_RESTART} immediately, staggering ${deferred.length} by ${MISSED_JOB_STAGGER_MS}ms`, 'INFO');
+        log(`[Cron] Startup: deferred ${overdueAgentTurns.length} overdue AI job(s) by at least ${Math.round(STARTUP_AGENT_TURN_GRACE_MS / 60000)}min`, 'INFO');
         saveCronStore(this.store);
     },
 
@@ -590,6 +591,28 @@ const cronService = {
     },
 
     async _executeJob(job, nowMs) {
+        const payloadKind = job.payload?.kind;
+        if (payloadKind === 'agentTurn') {
+            const usageState = getUsageLimitState();
+            if (usageState.active) {
+                const deferMs = Math.max(60 * 1000, usageState.remainingMs);
+                job.state.runningAtMs = undefined;
+                job.state.nextRunAtMs = Date.now() + deferMs;
+                job.state.lastStatus = 'deferred_usage_limit';
+                job.state.lastError = undefined;
+                appendCronRunLog(job.id, {
+                    action: 'deferred',
+                    status: 'deferred_usage_limit',
+                    delivered: false,
+                    durationMs: 0,
+                    nextRunAtMs: job.state.nextRunAtMs,
+                });
+                log(`[Cron] Deferred AI job ${job.id} until usage cooldown ends (${Math.ceil(deferMs / 60000)}min)`, 'WARN');
+                saveCronStore(this.store);
+                return;
+            }
+        }
+
         log(`[Cron] Executing job ${job.id}: "${flattenForLog(job.name, 80)}"`, 'DEBUG');
         job.state.runningAtMs = nowMs;
         // Fix 2 (BAT-21): Clear nextRunAtMs before execution to prevent
@@ -603,7 +626,6 @@ const cronService = {
 
         // Select timeout based on payload kind: agentTurn needs much longer (full AI turn with tools)
         // Use optional chaining — corrupted jobs.json could have null/missing payload
-        const payloadKind = job.payload?.kind;
         const effectiveTimeout = payloadKind === 'agentTurn' ? AGENT_TURN_TIMEOUT_MS : JOB_TIMEOUT_MS;
 
         // Timeout race for job execution.
