@@ -2911,14 +2911,19 @@ async function chat(chatId, userMessage, options = {}) {
         return (fallback >= 10 && fallback <= 100) ? fallback : 35;
     })();
     const requestedBackgroundSteps = parseInt(options.backgroundMaxSteps, 10);
-    const backgroundMaxSteps = Number.isFinite(requestedBackgroundSteps)
+    const backgroundToolSteps = Number.isFinite(requestedBackgroundSteps)
         ? Math.max(1, Math.min(requestedBackgroundSteps, 6))
         : 4;
+    const BACKGROUND_TOOL_STEPS = isBackgroundBudget
+        ? Math.min(configuredMaxSteps, backgroundToolSteps)
+        : null;
+    // Background turns get one extra model call after the tool budget, with tools
+    // stripped, so a real finding can still be summarized/delivered.
     const MAX_STEPS = isBackgroundBudget
-        ? Math.min(configuredMaxSteps, backgroundMaxSteps)
+        ? BACKGROUND_TOOL_STEPS + 1
         : configuredMaxSteps;
     if (isBackgroundBudget) {
-        log(`[BackgroundBudget] turnId=${turnId} maxSteps=${MAX_STEPS} toolSearchMax=1 aggressiveAging=true`, 'INFO');
+        log(`[BackgroundBudget] turnId=${turnId} toolSteps=${BACKGROUND_TOOL_STEPS} finalizationCall=1 toolSearchMax=1 aggressiveAging=true`, 'INFO');
     }
     // NOTE: `activeModel` was already resolved above (before buildSystemBlocks)
     // so the system prompt and the API request agree on the model. Don't
@@ -2933,6 +2938,10 @@ async function chat(chatId, userMessage, options = {}) {
     try { // BAT-253: catch network errors → sanitize before user output
 
         while (stepCount < MAX_STEPS) {
+            if (isBackgroundBudget && stepCount >= BACKGROUND_TOOL_STEPS) {
+                _loopFinalIteration = true;
+            }
+
             // BAT-259: Age old tool results to reduce payload bloat
             ageToolResults(
                 messages,
@@ -3788,8 +3797,12 @@ async function chat(chatId, userMessage, options = {}) {
         // Budget exhaustion explicit handling
         if (stepCount >= MAX_STEPS) {
             if (isBackgroundBudget) {
-                log(`[BackgroundBudget] turnId=${turnId} exhausted at ${stepCount}/${MAX_STEPS}; returning SILENT_REPLY`, 'WARN');
-                return 'SILENT_REPLY';
+                const backgroundParsed = response && (response._parsed || adapter.fromApiResponse(response));
+                const finalText = backgroundParsed && typeof backgroundParsed.text === 'string'
+                    ? stripSilentReply(backgroundParsed.text).trim()
+                    : '';
+                log(`[BackgroundBudget] turnId=${turnId} exhausted after ${BACKGROUND_TOOL_STEPS} tool rounds; finalText=${finalText ? 'yes' : 'no'}`, 'WARN');
+                return finalText || 'SILENT_REPLY';
             }
 
             // P2.4: Track exhaustion reason in activeTask
