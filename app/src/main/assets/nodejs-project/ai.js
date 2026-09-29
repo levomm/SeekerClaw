@@ -1950,6 +1950,18 @@ async function claudeApiCall(body, chatId, traceCtx = {}) {
             // Classify error and decide whether to retry (BAT-22)
             if (res.status !== 200) {
                 const errClass = classifyApiError(res.status, res.data);
+
+                // Usage exhaustion is not a short-lived transport/rate spike. Retrying the
+                // same 10k+ token request three more times only burns time and creates a
+                // retry storm. Trip the persistent guard immediately, before generic 429
+                // retry handling, and let a later foreground user turn probe recovery.
+                if (errClass.type === 'usage_limit') {
+                    const state = activateUsageLimitCooldown('usage_limit_reached');
+                    log(`[UsageGuard] Usage limit reached — no immediate retry; background AI paused for ${Math.ceil(state.remainingMs / 60000)}min`, 'WARN');
+                    if (!background) updateAgentHealth('degraded', { type: errClass.type, status: res.status, message: errClass.userMessage });
+                    break;
+                }
+
                 if (errClass.retryable && retries < MAX_RETRIES) {
                     // OAuth 401: refresh token before retry so the next attempt uses new credentials
                     if (errClass.type === 'auth' && typeof adapter.handleUnauthorized === 'function') {
