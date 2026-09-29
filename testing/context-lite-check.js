@@ -10,6 +10,15 @@ const {
     wrapFormatTools,
 } = require('../app/src/main/assets/nodejs-project/deferred-tools');
 const { compactStablePrompt } = require('../app/src/main/assets/nodejs-project/prompt-compact');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const {
+    configureUsageLimitGuard,
+    activateUsageLimitCooldown,
+    getUsageLimitState,
+    clearUsageLimitCooldown,
+} = require('../app/src/main/assets/nodejs-project/usage-limit-guard');
 
 const sample = [
     { name: 'read' },
@@ -147,5 +156,19 @@ assert.ok(
 assert.ok(!secondaryCompacted.prompt.includes('huge diagnostics manual'));
 assert.ok(!secondaryCompacted.prompt.includes('huge heartbeat manual'));
 assert.ok(!secondaryCompacted.prompt.includes('huge session memory manual'));
+
+const guardDir = fs.mkdtempSync(path.join(os.tmpdir(), 'osz-usage-guard-'));
+configureUsageLimitGuard({ workDir: guardDir, cooldownMs: 60 * 1000 });
+const t0 = Date.now();
+const firstCooldown = activateUsageLimitCooldown('usage_limit_reached', t0, 60 * 1000);
+assert.strictEqual(firstCooldown.active, true);
+assert.ok(firstCooldown.untilMs >= t0 + 60 * 1000);
+const secondCooldown = activateUsageLimitCooldown('usage_limit_reached', t0 + 1000, 60 * 1000);
+assert.strictEqual(secondCooldown.untilMs, firstCooldown.untilMs, 'active cooldown must not extend on every probe');
+assert.strictEqual(getUsageLimitState(t0 + 2000).active, true);
+assert.ok(fs.existsSync(path.join(guardDir, 'usage_limit_state')), 'usage cooldown must persist to disk across restarts');
+assert.strictEqual(clearUsageLimitCooldown(), true);
+assert.strictEqual(getUsageLimitState(t0 + 2000).active, false);
+fs.rmSync(guardDir, { recursive: true, force: true });
 
 console.log('context-lite-check: PASS');
