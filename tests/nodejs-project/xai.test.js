@@ -833,8 +833,8 @@ async function testHandleUnauthorized() {
     ok('ai.js still declares getProviderApiKey (H3 anchor present)', fnIdx !== -1);
     const importRegion = fnIdx !== -1 ? aiSrc.slice(0, fnIdx) : '';
     ok('ai.js imports XAI_KEY from config (H3)', /\bXAI_KEY\b/.test(importRegion));
-    ok("ai.js getProviderApiKey has the `PROVIDER === 'xai' ? XAI_KEY` branch (H3)",
-        /PROVIDER === 'xai'\s*\?\s*XAI_KEY/.test(aiSrc));
+    ok("ai.js getProviderApiKey routes providerId xai → XAI_KEY (H3)",
+        /providerId === 'xai'\s*\?\s*XAI_KEY/.test(aiSrc));
 })();
 
 // ── ai.js rebuilds request headers after an OAuth 401 refresh (stale-bearer) ──

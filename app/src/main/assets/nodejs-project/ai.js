@@ -164,15 +164,19 @@ function _setWalletPromptSnapshotForTests(snapshot) {
     _walletPromptSnapshot = snapshot;
 }
 
-function getProviderApiKey() {
-    return PROVIDER === 'openai' ? OPENAI_KEY
+function getProviderApiKey(providerId = PROVIDER) {
+    if (providerId === 'hive') {
+        const hive = getAdapter('hive');
+        return typeof hive.getApiKey === 'function' ? hive.getApiKey() : '';
+    }
+    return providerId === 'openai' ? OPENAI_KEY
         // BAT-1124 H3: xai MUST resolve to XAI_KEY, never fall through to
         // ANTHROPIC_KEY — otherwise xai+api_key would Bearer the Anthropic key
         // to api.x.ai (auth fail + secret exfiltration). In oauth mode XAI_KEY
         // is blank and xai.buildHeaders uses the OAuth token instead.
-        : PROVIDER === 'xai' ? XAI_KEY
-        : PROVIDER === 'openrouter' ? OPENROUTER_KEY
-        : PROVIDER === 'custom' ? CUSTOM_KEY
+        : providerId === 'xai' ? XAI_KEY
+        : providerId === 'openrouter' ? OPENROUTER_KEY
+        : providerId === 'custom' ? CUSTOM_KEY
         : ANTHROPIC_KEY;
 }
 
@@ -1712,8 +1716,8 @@ const AUTH_FAIL_THRESHOLD = 3;
 const SESSION_PROBE_INTERVAL_MS = 5 * 60 * 1000; // 5 min cooldown probe
 
 // BAT-315: Error classification delegated to provider adapter
-function classifyApiError(status, data) {
-    return getAdapter(PROVIDER).classifyError(status, data);
+function classifyApiError(status, data, providerId = PROVIDER) {
+    return getAdapter(providerId).classifyError(status, data);
 }
 
 // BAT-1130: Anthropic's setup_token (Claude Code OAuth) path mislabels some
@@ -1733,16 +1737,18 @@ function _isUsageFilter400(status, data) {
     return /out of extra usage/i.test(msg);
 }
 
-function classifyNetworkError(err) {
-    return getAdapter(PROVIDER).classifyNetworkError(err);
+function classifyNetworkError(err, providerId = PROVIDER) {
+    return getAdapter(providerId).classifyNetworkError(err);
 }
 
 async function claudeApiCall(body, chatId, traceCtx = {}) {
-    const { turnId, iteration, background } = traceCtx;
+    const { turnId, iteration, background, providerOverride } = traceCtx;
+    const effectiveProvider = providerOverride || PROVIDER;
+    const effectiveAdapter = getAdapter(effectiveProvider);
 
-    // Background work never probes a known-exhausted account. Foreground user
-    // turns are still allowed through so a manual message can detect recovery.
-    if (background) {
+    // The persistent UsageGuard represents the primary OpenAI account only.
+    // Hive fallback traffic must keep flowing during that cooldown.
+    if (background && effectiveProvider === 'openai') {
         const usageState = getUsageLimitState();
         if (usageState.active) {
             log(`[UsageGuard] Skipping background API call chatId=${String(chatId || '')} remaining=${Math.ceil(usageState.remainingMs / 60000)}min`, 'DEBUG');
@@ -1769,7 +1775,7 @@ async function claudeApiCall(body, chatId, traceCtx = {}) {
     apiCallInFlight = new Promise(r => { resolve = r; });
 
     // Session expiry guard: if expired, allow one probe every 5 min to detect recovery
-    if (_sessionExpired) {
+    if (effectiveProvider === PROVIDER && _sessionExpired) {
         const sinceExpiry = Date.now() - _sessionExpiredAt;
         if (sinceExpiry < SESSION_PROBE_INTERVAL_MS) {
             apiCallInFlight = null;
@@ -1784,7 +1790,7 @@ async function claudeApiCall(body, chatId, traceCtx = {}) {
     }
 
     // Rate-limit pre-check: delay if token budget is critically low
-    if (lastRateLimitTokensRemaining < 5000) {
+    if (effectiveProvider === PROVIDER && lastRateLimitTokensRemaining < 5000) {
         const resetTime = lastRateLimitTokensReset ? new Date(lastRateLimitTokensReset).getTime() : 0;
         const now = Date.now();
         // Wait until the reset time, capped at 15s
@@ -1820,10 +1826,11 @@ async function claudeApiCall(body, chatId, traceCtx = {}) {
     }
 
     try {
-        // BAT-315: Provider-agnostic API call — adapter handles endpoint, headers, streaming
-        const adapter = getAdapter(PROVIDER);
+        // BAT-315: Provider-agnostic API call — adapter handles endpoint, headers, streaming.
+        // v6: providerOverride lets the same turn fail over from OpenAI to Hive DeepSeek.
+        const adapter = effectiveAdapter;
         const endpoint = adapter.getEndpoint ? adapter.getEndpoint() : adapter.endpoint;
-        const apiKey = getProviderApiKey();
+        const apiKey = getProviderApiKey(effectiveProvider);
         // BAT-1143 D6: PROACTIVE OAuth refresh — renew the access token BEFORE it
         // expires, rather than waiting for a status code (xAI returns 403-not-401 on
         // expiry, so a reactive-only path never fires and the agent dies every ~6h).
@@ -1843,7 +1850,8 @@ async function claudeApiCall(body, chatId, traceCtx = {}) {
             && adapter.currentRefreshGeneration() !== _genBeforeRefresh;
         // `let` (not const): the OAuth 401→refresh retry rebuilds this below so the
         // retry carries the freshly-rotated bearer, not the expired one.
-        let headers = adapter.buildHeaders(apiKey, AUTH_TYPE);
+        const effectiveAuthType = effectiveProvider === 'hive' ? 'api_key' : AUTH_TYPE;
+        let headers = adapter.buildHeaders(apiKey, effectiveAuthType);
 
         // Select streaming function based on provider protocol
         const streamFn = adapter.streamProtocol === 'chat-completions'
@@ -1917,7 +1925,7 @@ async function claudeApiCall(body, chatId, traceCtx = {}) {
                         // these writes relied on database.js's now-removed 60s
                         // setInterval safety net.
                         markDbDirty();
-                    } catch (e) { log(`[${displayNameForProvider(PROVIDER)}] Failed to log network error to DB: ${e.message}`, 'WARN'); }
+                    } catch (e) { log(`[${displayNameForProvider(effectiveProvider)}] Failed to log network error to DB: ${e.message}`, 'WARN'); }
                 }
                 if (!background) updateAgentHealth('error', { type: isTimeoutClass ? 'timeout' : 'network', status: -1, message: networkErr.message });
                 throw networkErr;
@@ -1949,7 +1957,7 @@ async function claudeApiCall(body, chatId, traceCtx = {}) {
 
             // Classify error and decide whether to retry (BAT-22)
             if (res.status !== 200) {
-                const errClass = classifyApiError(res.status, res.data);
+                const errClass = classifyApiError(res.status, res.data, effectiveProvider);
 
                 // Usage exhaustion is not a short-lived transport/rate spike. Retrying the
                 // same 10k+ token request three more times only burns time and creates a
@@ -1980,7 +1988,7 @@ async function claudeApiCall(body, chatId, traceCtx = {}) {
                         // pre-loop EXPIRED token — critical because this loop is xAI's ONLY
                         // refresh path, so re-sending the stale bearer 401s again and burns a
                         // single-use refresh rotation on every attempt. No-op for api_key/claude.
-                        headers = adapter.buildHeaders(apiKey, AUTH_TYPE);
+                        headers = adapter.buildHeaders(apiKey, effectiveAuthType);
                         refreshedThisCall = true; // BAT-1143 D8: mark the post-refresh retry
                     }
                     const retryAfterRaw = parseInt(res.headers?.['retry-after']) || 0;
@@ -2001,7 +2009,7 @@ async function claudeApiCall(body, chatId, traceCtx = {}) {
                     // "Claude API 429", making "why is Claude rate limiting me"
                     // support tickets ambiguous about which provider actually
                     // returned the error.
-                    log(`[Retry] ${displayNameForProvider(PROVIDER)} API ${res.status} (${errClass.type}), retry ${retries + 1}/${MAX_RETRIES}, base ${backoffMs}ms, waiting ${waitMs}ms`, 'WARN');
+                    log(`[Retry] ${displayNameForProvider(effectiveProvider)} API ${res.status} (${errClass.type}), retry ${retries + 1}/${MAX_RETRIES}, base ${backoffMs}ms, waiting ${waitMs}ms`, 'WARN');
                     if (!background) updateAgentHealth('degraded', { type: errClass.type, status: res.status, message: errClass.userMessage });
                     retries++;
                     await new Promise(r => setTimeout(r, waitMs));
@@ -2044,8 +2052,9 @@ async function claudeApiCall(body, chatId, traceCtx = {}) {
 
         // Report usage metrics + cache status + health state
         if (res.status === 200) {
-            // A successful inference proves the usage-limit condition has recovered.
-            clearUsageLimitCooldown();
+            // Only a successful primary OpenAI inference proves its usage-limit
+            // condition recovered. Hive fallback success must NOT clear that cooldown.
+            if (effectiveProvider === 'openai') clearUsageLimitCooldown();
             reportUsage(rawUsage);
             // BAT-1143 D8: a 200 proves the account can reach the model — clear the
             // xAI tier-gate breaker (the "recovered" signal). No-op for other providers.
@@ -2071,8 +2080,8 @@ async function claudeApiCall(body, chatId, traceCtx = {}) {
                 log('[Session] Token recovered — resuming normal operation', 'INFO');
             }
         } else {
-            const errClass = classifyApiError(res.status, res.data);
-            if (errClass.type === 'usage_limit') {
+            const errClass = classifyApiError(res.status, res.data, effectiveProvider);
+            if (effectiveProvider === 'openai' && errClass.type === 'usage_limit') {
                 const state = activateUsageLimitCooldown('usage_limit_reached');
                 log(`[UsageGuard] OpenAI usage limit reached — background AI paused for ${Math.ceil(state.remainingMs / 60000)}min`, 'WARN');
             }
@@ -2154,6 +2163,9 @@ async function claudeApiCall(body, chatId, traceCtx = {}) {
             });
         }
 
+        // Carry transport provenance back to chat() so parsing/error classification
+        // uses the adapter that actually produced this response.
+        res._providerId = effectiveProvider;
         return res;
     } finally {
         if (typingInterval) clearInterval(typingInterval);
@@ -2351,6 +2363,7 @@ const MODEL_CONTEXT_LIMITS = {
     'gpt-5.4-mini':        200000,
     'gpt-5.2':             200000, // kept for existing users with 5.2 still selected (removed from UI dropdown)
     'gpt-5.3-codex':       200000, // BAT-1151: dropped from registry; kept for existing users still on it
+    'deepseek-ai/deepseek-v4.1-flash': 200000, // Hive actual 1M; conservative mobile cap
     // BAT-1124: xAI Grok context windows. grok-4.x is ~256k+ actual (grok-4.5 ~500k) →
     // 200000 mobile cap (consistent with the claude/gpt caps above). Registry ships
     // grok-4.6 / grok-4.5 / grok-4.3; anything else is a user-typed Custom model.
@@ -2825,6 +2838,12 @@ async function chat(chatId, userMessage, options = {}) {
 
     // BAT-315: Provider-agnostic system prompt formatting
     const adapter = getAdapter(PROVIDER);
+    const hiveAdapter = getAdapter('hive');
+    const hiveFallbackConfigured = PROVIDER === 'openai'
+        && hiveAdapter
+        && typeof hiveAdapter.isConfigured === 'function'
+        && hiveAdapter.isConfigured();
+    let _hiveFallbackLogged = false;
     // BAT-1130: `let` (not `const`) so the content-filter self-heal can rebuild
     // it lean (without volatile memory) and retry the same turn.
     let systemBlocks = adapter.formatSystemPrompt(stablePrompt, dynamicPrompt + resumeBlock, AUTH_TYPE);
@@ -2949,6 +2968,22 @@ async function chat(chatId, userMessage, options = {}) {
                 isBackgroundBudget ? { recencyThreshold: 2, sizeThreshold: 400 } : {}
             );
 
+            // v6: while the primary OpenAI account is in a known usage-limit
+            // cooldown, route the whole iteration through Hive DeepSeek instead of
+            // hammering OpenAI again. The cooldown is NOT cleared by Hive success.
+            let requestProvider = PROVIDER;
+            let requestAdapter = adapter;
+            let requestModel = activeModel;
+            if (hiveFallbackConfigured && getUsageLimitState().active) {
+                requestProvider = 'hive';
+                requestAdapter = hiveAdapter;
+                requestModel = hiveAdapter.getModel();
+                if (!_hiveFallbackLogged) {
+                    _hiveFallbackLogged = true;
+                    log(`[HiveFallback] OpenAI usage cooldown active — using ${requestModel}`, 'WARN');
+                }
+            }
+
             // BAT-315: Provider-agnostic tool formatting + request body building
             // DeerFlow P1: Strip tools on loop-break final iteration so model can only respond with text
             // DeerFlow P2: Per-provider tool strategy — Claude gets full schemas + caching,
@@ -2957,7 +2992,7 @@ async function chat(chatId, userMessage, options = {}) {
             // can't handle tool_search discovery pattern (leak raw XML instead of proper calls).
             // Re-enable per-model when we can detect tool-use capability from OpenRouter API.
             const rawTools = _loopFinalIteration ? [] : (_deps.getTools ? _deps.getTools() : []);
-            const formattedTools = adapter.formatTools(rawTools, chatId);
+            const formattedTools = requestAdapter.formatTools(rawTools, chatId);
 
             // Context token estimation: check usage before API call, adaptively trim if needed.
             // Cache systemChars for the turn (stable). toolChars recomputed each iteration
@@ -2969,7 +3004,7 @@ async function chat(chatId, userMessage, options = {}) {
 
             // DeerFlow P2: Summarize old messages before adaptive trim drops them.
             // Reuse ctx for both summarization check and trim check to avoid duplicate logging.
-            let ctx = checkContextUsage(systemBlocks, messages, formattedTools, activeModel, turnId, _ctxCache);
+            let ctx = checkContextUsage(systemBlocks, messages, formattedTools, requestModel, turnId, _ctxCache);
             log(`[ContextBudget] ${JSON.stringify({
                 turnId,
                 chatId: String(chatId || ''),
@@ -3004,7 +3039,7 @@ async function chat(chatId, userMessage, options = {}) {
                     // only sanitizes when it actually trims.
                     sanitizeConversation(messages, turnId);
                     // Messages changed — recompute context usage
-                    ctx = checkContextUsage(systemBlocks, messages, formattedTools, activeModel, turnId, _ctxCache);
+                    ctx = checkContextUsage(systemBlocks, messages, formattedTools, requestModel, turnId, _ctxCache);
                 }
             }
             // Trim-recheck loop: keep trimming until safe or we hit the message floor
@@ -3015,7 +3050,7 @@ async function chat(chatId, userMessage, options = {}) {
                 // nothing; re-running it only pays for more full-payload
                 // JSON.stringify walks in checkContextUsage.
                 if (adaptiveTrim(messages, ctx.usage, turnId, _turnAnchor) === 0) break;
-                ctx = checkContextUsage(systemBlocks, messages, formattedTools, activeModel, turnId, _ctxCache);
+                ctx = checkContextUsage(systemBlocks, messages, formattedTools, requestModel, turnId, _ctxCache);
                 trimPasses++;
             }
             // Defensive: re-sanitize after trim to fix any orphaned tool pairs
@@ -3049,11 +3084,11 @@ async function chat(chatId, userMessage, options = {}) {
                 try { return _runtimeState ? _runtimeState.read() : null; }
                 catch (_) { return null; }
             })();
-            let _registryProviderId = adapter.id;
+            let _registryProviderId = requestAdapter.id;
             let _authForRegistry;
-            if (adapter.id === 'openai') {
+            if (requestAdapter.id === 'openai') {
                 _authForRegistry = OPENAI_AUTH_TYPE;
-            } else if (adapter.id === 'custom' && CUSTOM_FORMAT === 'responses') {
+            } else if (requestAdapter.id === 'custom' && CUSTOM_FORMAT === 'responses') {
                 _registryProviderId = 'openai';
                 _authForRegistry = 'api_key';
             } else {
@@ -3089,7 +3124,7 @@ async function chat(chatId, userMessage, options = {}) {
             const effectiveSynthetic = isHeartbeatChat ? 'heartbeat' : callerSynthetic;
             const requestOptions = {
                 reasoningEnabled: !!(_liveRtState && _liveRtState.reasoningEnabled),
-                reasoningSupport: reasoningSupportFor(_registryProviderId, activeModel, _authForRegistry),
+                reasoningSupport: reasoningSupportFor(_registryProviderId, requestModel, _authForRegistry),
                 customEchoOverride: !!(_liveRtState && _liveRtState.customEchoReasoning),
                 reasoningMode: effectiveReasoningMode,
                 synthetic: effectiveSynthetic,
@@ -3126,8 +3161,8 @@ async function chat(chatId, userMessage, options = {}) {
             // report has the full context to triage from one log line.
             const _userToggleWouldEmit = requestOptions.reasoningEnabled
                 && requestOptions.reasoningSupport === 'yes';
-            const _modelIsCodex = typeof activeModel === 'string'
-                && activeModel.includes('codex');
+            const _modelIsCodex = typeof requestModel === 'string'
+                && requestModel.includes('codex');
             // R3 Copilot: Custom with CUSTOM_FORMAT='responses' DELEGATES
             // to openai.formatRequest, which carries OpenAI's transport-
             // required exceptions (OAuth + codex models). Pre-fix the
@@ -3138,11 +3173,11 @@ async function chat(chatId, userMessage, options = {}) {
             // Custom-Responses as the OpenAI Responses transport here
             // mirrors what the delegate actually does, so the log
             // reflects effective behavior.
-            const _usesOpenAIResponsesTransport = (PROVIDER === 'openai')
-                || (PROVIDER === 'custom' && CUSTOM_FORMAT === 'responses');
+            const _usesOpenAIResponsesTransport = (requestProvider === 'openai')
+                || (requestProvider === 'custom' && CUSTOM_FORMAT === 'responses');
             const _effectiveTransportProvider = _usesOpenAIResponsesTransport
                 ? 'openai'
-                : PROVIDER;
+                : requestProvider;
             const _effectiveTransportAuth = _usesOpenAIResponsesTransport
                 ? OPENAI_AUTH_TYPE
                 : AUTH_TYPE;
@@ -3156,7 +3191,7 @@ async function chat(chatId, userMessage, options = {}) {
                     _SUPPRESSION_REASONS.SYNTHETIC_HEARTBEAT,
                     `chatId=${String(chatId).slice(0, 32)} provider=${_effectiveTransportProvider} `
                     + `auth=${_effectiveTransportAuth} `
-                    + `model=${String(activeModel).slice(0, 48)}`,
+                    + `model=${String(requestModel).slice(0, 48)}`,
                 );
             }
 
@@ -3181,13 +3216,13 @@ async function chat(chatId, userMessage, options = {}) {
                 anchorGuardStats.repairs++;
                 log(`[AnchorGuard] ${JSON.stringify({
                     turnId, taskId, step: stepCount,
-                    adapter: (adapter && adapter.id) || activeModel,
+                    adapter: (requestAdapter && requestAdapter.id) || requestModel,
                     event: 'anchor_missing_repaired', len: messages.length,
                     cumulative: anchorGuardStats.repairs,
                 })}`, anchorGuardStats.repairs <= 3 ? 'ERROR' : 'DEBUG');
             }
-            const apiMessages = adapter.toApiMessages(messages, activeModel, requestOptions);
-            const body = adapter.formatRequest(activeModel, 4096, systemBlocks, apiMessages, formattedTools, requestOptions);
+            const apiMessages = requestAdapter.toApiMessages(messages, requestModel, requestOptions);
+            const body = requestAdapter.formatRequest(requestModel, 4096, systemBlocks, apiMessages, formattedTools, requestOptions);
 
             // BAT-549 Commit 6: extended-thinking status indicator.
             // Per v4 contract, the bubble appears ONLY when all three
@@ -3225,6 +3260,7 @@ async function chat(chatId, userMessage, options = {}) {
                     turnId,
                     iteration: stepCount,
                     background: effectiveSynthetic === 'heartbeat' || String(chatId).startsWith('cron:'),
+                    providerOverride: requestProvider,
                 });
             } finally {
                 // Codex v3/v4 sign-off adjustment: cleanup is
@@ -3235,6 +3271,44 @@ async function chat(chatId, userMessage, options = {}) {
                 // The .catch swallows so a deletion failure never
                 // surfaces to the user; status is bonus UX.
                 thinkingStatus.cleanup().catch(() => {});
+            }
+
+            if (res.status !== 200 && requestProvider === 'openai' && hiveFallbackConfigured) {
+                const primaryErr = classifyApiError(res.status, res.data, 'openai');
+                if (primaryErr.type === 'usage_limit') {
+                    requestProvider = 'hive';
+                    requestAdapter = hiveAdapter;
+                    requestModel = hiveAdapter.getModel();
+                    _hiveFallbackLogged = true;
+                    log(`[HiveFallback] OpenAI usage_limit_reached — retrying same turn via ${requestModel}`, 'WARN');
+
+                    // Rebuild the SAME neutral turn for Hive's Chat Completions wire shape.
+                    // Persistent memory/history are untouched; only transport+model change.
+                    const hiveSystemBlocks = hiveAdapter.formatSystemPrompt(
+                        stablePrompt,
+                        dynamicPrompt + resumeBlock,
+                        'api_key'
+                    );
+                    const hiveTools = hiveAdapter.formatTools(rawTools, chatId);
+                    const hiveMessages = hiveAdapter.toApiMessages(messages, requestModel, {
+                        ...requestOptions,
+                        reasoningSupport: 'unknown',
+                    });
+                    const hiveBody = hiveAdapter.formatRequest(
+                        requestModel,
+                        4096,
+                        hiveSystemBlocks,
+                        hiveMessages,
+                        hiveTools,
+                        { ...requestOptions, reasoningSupport: 'unknown' }
+                    );
+                    res = await claudeApiCall(hiveBody, chatId, {
+                        turnId,
+                        iteration: stepCount,
+                        background: effectiveSynthetic === 'heartbeat' || String(chatId).startsWith('cron:'),
+                        providerOverride: 'hive',
+                    });
+                }
             }
 
             if (res.status !== 200) {
@@ -3421,7 +3495,8 @@ async function chat(chatId, userMessage, options = {}) {
                     continue;
                 }
 
-                const errClass = classifyApiError(res.status, res.data);
+                const responseProvider = res._providerId || requestProvider;
+                const errClass = classifyApiError(res.status, res.data, responseProvider);
                 const userText = errClass.userMessage || `API error: ${res.status}`;
                 log(`[OutputPath] ${JSON.stringify({
                     turnId, chatId: String(chatId), errorClass: errClass.type,
@@ -3442,8 +3517,10 @@ async function chat(chatId, userMessage, options = {}) {
             // should re-attempt step 1 first.
             _reasoningRecoveryStep = 0;
 
-            // BAT-315: Parse response through adapter into neutral format
-            const parsed = adapter.fromApiResponse(res.data);
+            // BAT-315: Parse response through the adapter that actually answered.
+            const responseProvider = res._providerId || requestProvider;
+            const responseAdapter = getAdapter(responseProvider);
+            const parsed = responseAdapter.fromApiResponse(res.data);
             // Keep raw response for fallback text extraction later
             response = res.data;
             response._parsed = parsed;

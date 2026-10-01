@@ -36,6 +36,7 @@ register(require('./claude'));
 register(require('./openai'));
 register(require('./openrouter'));
 register(require('./custom'));
+register(require('./hive'));
 register(require('./xai'));
 
 module.exports = { getAdapter, listProviders, register };
