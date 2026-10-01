@@ -164,15 +164,19 @@ function _setWalletPromptSnapshotForTests(snapshot) {
     _walletPromptSnapshot = snapshot;
 }
 
-function getProviderApiKey() {
-    return PROVIDER === 'openai' ? OPENAI_KEY
+function getProviderApiKey(providerId = PROVIDER) {
+    if (providerId === 'hive') {
+        const hive = getAdapter('hive');
+        return typeof hive.getApiKey === 'function' ? hive.getApiKey() : '';
+    }
+    return providerId === 'openai' ? OPENAI_KEY
         // BAT-1124 H3: xai MUST resolve to XAI_KEY, never fall through to
         // ANTHROPIC_KEY — otherwise xai+api_key would Bearer the Anthropic key
         // to api.x.ai (auth fail + secret exfiltration). In oauth mode XAI_KEY
         // is blank and xai.buildHeaders uses the OAuth token instead.
-        : PROVIDER === 'xai' ? XAI_KEY
-        : PROVIDER === 'openrouter' ? OPENROUTER_KEY
-        : PROVIDER === 'custom' ? CUSTOM_KEY
+        : providerId === 'xai' ? XAI_KEY
+        : providerId === 'openrouter' ? OPENROUTER_KEY
+        : providerId === 'custom' ? CUSTOM_KEY
         : ANTHROPIC_KEY;
 }
 
@@ -1712,8 +1716,8 @@ const AUTH_FAIL_THRESHOLD = 3;
 const SESSION_PROBE_INTERVAL_MS = 5 * 60 * 1000; // 5 min cooldown probe
 
 // BAT-315: Error classification delegated to provider adapter
-function classifyApiError(status, data) {
-    return getAdapter(PROVIDER).classifyError(status, data);
+function classifyApiError(status, data, providerId = PROVIDER) {
+    return getAdapter(providerId).classifyError(status, data);
 }
 
 // BAT-1130: Anthropic's setup_token (Claude Code OAuth) path mislabels some
@@ -1733,16 +1737,18 @@ function _isUsageFilter400(status, data) {
     return /out of extra usage/i.test(msg);
 }
 
-function classifyNetworkError(err) {
-    return getAdapter(PROVIDER).classifyNetworkError(err);
+function classifyNetworkError(err, providerId = PROVIDER) {
+    return getAdapter(providerId).classifyNetworkError(err);
 }
 
 async function claudeApiCall(body, chatId, traceCtx = {}) {
-    const { turnId, iteration, background } = traceCtx;
+    const { turnId, iteration, background, providerOverride } = traceCtx;
+    const effectiveProvider = providerOverride || PROVIDER;
+    const effectiveAdapter = getAdapter(effectiveProvider);
 
-    // Background work never probes a known-exhausted account. Foreground user
-    // turns are still allowed through so a manual message can detect recovery.
-    if (background) {
+    // The persistent UsageGuard represents the primary OpenAI account only.
+    // Hive fallback traffic must keep flowing during that cooldown.
+    if (background && effectiveProvider === 'openai') {
         const usageState = getUsageLimitState();
         if (usageState.active) {
             log(`[UsageGuard] Skipping background API call chatId=${String(chatId || '')} remaining=${Math.ceil(usageState.remainingMs / 60000)}min`, 'DEBUG');
@@ -1769,7 +1775,7 @@ async function claudeApiCall(body, chatId, traceCtx = {}) {
     apiCallInFlight = new Promise(r => { resolve = r; });
 
     // Session expiry guard: if expired, allow one probe every 5 min to detect recovery
-    if (_sessionExpired) {
+    if (effectiveProvider === PROVIDER && _sessionExpired) {
         const sinceExpiry = Date.now() - _sessionExpiredAt;
         if (sinceExpiry < SESSION_PROBE_INTERVAL_MS) {
             apiCallInFlight = null;
@@ -1784,7 +1790,7 @@ async function claudeApiCall(body, chatId, traceCtx = {}) {
     }
 
     // Rate-limit pre-check: delay if token budget is critically low
-    if (lastRateLimitTokensRemaining < 5000) {
+    if (effectiveProvider === PROVIDER && lastRateLimitTokensRemaining < 5000) {
         const resetTime = lastRateLimitTokensReset ? new Date(lastRateLimitTokensReset).getTime() : 0;
         const now = Date.now();
         // Wait until the reset time, capped at 15s
@@ -1820,10 +1826,11 @@ async function claudeApiCall(body, chatId, traceCtx = {}) {
     }
 
     try {
-        // BAT-315: Provider-agnostic API call — adapter handles endpoint, headers, streaming
-        const adapter = getAdapter(PROVIDER);
+        // BAT-315: Provider-agnostic API call — adapter handles endpoint, headers, streaming.
+        // v6: providerOverride lets the same turn fail over from OpenAI to Hive DeepSeek.
+        const adapter = effectiveAdapter;
         const endpoint = adapter.getEndpoint ? adapter.getEndpoint() : adapter.endpoint;
-        const apiKey = getProviderApiKey();
+        const apiKey = getProviderApiKey(effectiveProvider);
         // BAT-1143 D6: PROACTIVE OAuth refresh — renew the access token BEFORE it
         // expires, rather than waiting for a status code (xAI returns 403-not-401 on
         // expiry, so a reactive-only path never fires and the agent dies every ~6h).
@@ -1843,7 +1850,8 @@ async function claudeApiCall(body, chatId, traceCtx = {}) {
             && adapter.currentRefreshGeneration() !== _genBeforeRefresh;
         // `let` (not const): the OAuth 401→refresh retry rebuilds this below so the
         // retry carries the freshly-rotated bearer, not the expired one.
-        let headers = adapter.buildHeaders(apiKey, AUTH_TYPE);
+        const effectiveAuthType = effectiveProvider === 'hive' ? 'api_key' : AUTH_TYPE;
+        let headers = adapter.buildHeaders(apiKey, effectiveAuthType);
 
         // Select streaming function based on provider protocol
         const streamFn = adapter.streamProtocol === 'chat-completions'
@@ -1917,7 +1925,7 @@ async function claudeApiCall(body, chatId, traceCtx = {}) {
                         // these writes relied on database.js's now-removed 60s
                         // setInterval safety net.
                         markDbDirty();
-                    } catch (e) { log(`[${displayNameForProvider(PROVIDER)}] Failed to log network error to DB: ${e.message}`, 'WARN'); }
+                    } catch (e) { log(`[${displayNameForProvider(effectiveProvider)}] Failed to log network error to DB: ${e.message}`, 'WARN'); }
                 }
                 if (!background) updateAgentHealth('error', { type: isTimeoutClass ? 'timeout' : 'network', status: -1, message: networkErr.message });
                 throw networkErr;
@@ -1949,7 +1957,7 @@ async function claudeApiCall(body, chatId, traceCtx = {}) {
 
             // Classify error and decide whether to retry (BAT-22)
             if (res.status !== 200) {
-                const errClass = classifyApiError(res.status, res.data);
+                const errClass = classifyApiError(res.status, res.data, effectiveProvider);
 
                 // Usage exhaustion is not a short-lived transport/rate spike. Retrying the
                 // same 10k+ token request three more times only burns time and creates a
@@ -1980,7 +1988,7 @@ async function claudeApiCall(body, chatId, traceCtx = {}) {
                         // pre-loop EXPIRED token — critical because this loop is xAI's ONLY
                         // refresh path, so re-sending the stale bearer 401s again and burns a
                         // single-use refresh rotation on every attempt. No-op for api_key/claude.
-                        headers = adapter.buildHeaders(apiKey, AUTH_TYPE);
+                        headers = adapter.buildHeaders(apiKey, effectiveAuthType);
                         refreshedThisCall = true; // BAT-1143 D8: mark the post-refresh retry
                     }
                     const retryAfterRaw = parseInt(res.headers?.['retry-after']) || 0;
@@ -2001,7 +2009,7 @@ async function claudeApiCall(body, chatId, traceCtx = {}) {
                     // "Claude API 429", making "why is Claude rate limiting me"
                     // support tickets ambiguous about which provider actually
                     // returned the error.
-                    log(`[Retry] ${displayNameForProvider(PROVIDER)} API ${res.status} (${errClass.type}), retry ${retries + 1}/${MAX_RETRIES}, base ${backoffMs}ms, waiting ${waitMs}ms`, 'WARN');
+                    log(`[Retry] ${displayNameForProvider(effectiveProvider)} API ${res.status} (${errClass.type}), retry ${retries + 1}/${MAX_RETRIES}, base ${backoffMs}ms, waiting ${waitMs}ms`, 'WARN');
                     if (!background) updateAgentHealth('degraded', { type: errClass.type, status: res.status, message: errClass.userMessage });
                     retries++;
                     await new Promise(r => setTimeout(r, waitMs));
@@ -2044,8 +2052,9 @@ async function claudeApiCall(body, chatId, traceCtx = {}) {
 
         // Report usage metrics + cache status + health state
         if (res.status === 200) {
-            // A successful inference proves the usage-limit condition has recovered.
-            clearUsageLimitCooldown();
+            // Only a successful primary OpenAI inference proves its usage-limit
+            // condition recovered. Hive fallback success must NOT clear that cooldown.
+            if (effectiveProvider === 'openai') clearUsageLimitCooldown();
             reportUsage(rawUsage);
             // BAT-1143 D8: a 200 proves the account can reach the model — clear the
             // xAI tier-gate breaker (the "recovered" signal). No-op for other providers.
@@ -2071,8 +2080,8 @@ async function claudeApiCall(body, chatId, traceCtx = {}) {
                 log('[Session] Token recovered — resuming normal operation', 'INFO');
             }
         } else {
-            const errClass = classifyApiError(res.status, res.data);
-            if (errClass.type === 'usage_limit') {
+            const errClass = classifyApiError(res.status, res.data, effectiveProvider);
+            if (effectiveProvider === 'openai' && errClass.type === 'usage_limit') {
                 const state = activateUsageLimitCooldown('usage_limit_reached');
                 log(`[UsageGuard] OpenAI usage limit reached — background AI paused for ${Math.ceil(state.remainingMs / 60000)}min`, 'WARN');
             }
@@ -2154,6 +2163,9 @@ async function claudeApiCall(body, chatId, traceCtx = {}) {
             });
         }
 
+        // Carry transport provenance back to chat() so parsing/error classification
+        // uses the adapter that actually produced this response.
+        res._providerId = effectiveProvider;
         return res;
     } finally {
         if (typingInterval) clearInterval(typingInterval);
