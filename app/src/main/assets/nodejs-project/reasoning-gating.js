@@ -81,7 +81,7 @@ function detectCustomEchoBehavior(modelId, customEchoOverride) {
 
     // DeepSeek V4 family — server REQUIRES reasoning_content echo after tool calls.
     // Same family-substring matching as R1.
-    if (/(?:^|\/)deepseek-v4(?:-|$)/i.test(m)) return 'echo-on-tool-loop';
+    if (/(?:^|\/)deepseek-v4(?:[.-]|$)/i.test(m)) return 'echo-on-tool-loop';
 
     // Everything else (incl. qwen3-thinking, mistral-large-2407, gemini-deep-think,
     // llama-4-thinking, etc.) — start unknown until tested.
