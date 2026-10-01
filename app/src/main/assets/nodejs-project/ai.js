@@ -2363,6 +2363,7 @@ const MODEL_CONTEXT_LIMITS = {
     'gpt-5.4-mini':        200000,
     'gpt-5.2':             200000, // kept for existing users with 5.2 still selected (removed from UI dropdown)
     'gpt-5.3-codex':       200000, // BAT-1151: dropped from registry; kept for existing users still on it
+    'deepseek-ai/deepseek-v4.1-flash': 200000, // Hive actual 1M; conservative mobile cap
     // BAT-1124: xAI Grok context windows. grok-4.x is ~256k+ actual (grok-4.5 ~500k) →
     // 200000 mobile cap (consistent with the claude/gpt caps above). Registry ships
     // grok-4.6 / grok-4.5 / grok-4.3; anything else is a user-typed Custom model.
@@ -2837,6 +2838,12 @@ async function chat(chatId, userMessage, options = {}) {
 
     // BAT-315: Provider-agnostic system prompt formatting
     const adapter = getAdapter(PROVIDER);
+    const hiveAdapter = getAdapter('hive');
+    const hiveFallbackConfigured = PROVIDER === 'openai'
+        && hiveAdapter
+        && typeof hiveAdapter.isConfigured === 'function'
+        && hiveAdapter.isConfigured();
+    let _hiveFallbackLogged = false;
     // BAT-1130: `let` (not `const`) so the content-filter self-heal can rebuild
     // it lean (without volatile memory) and retry the same turn.
     let systemBlocks = adapter.formatSystemPrompt(stablePrompt, dynamicPrompt + resumeBlock, AUTH_TYPE);
@@ -2961,6 +2968,22 @@ async function chat(chatId, userMessage, options = {}) {
                 isBackgroundBudget ? { recencyThreshold: 2, sizeThreshold: 400 } : {}
             );
 
+            // v6: while the primary OpenAI account is in a known usage-limit
+            // cooldown, route the whole iteration through Hive DeepSeek instead of
+            // hammering OpenAI again. The cooldown is NOT cleared by Hive success.
+            let requestProvider = PROVIDER;
+            let requestAdapter = adapter;
+            let requestModel = activeModel;
+            if (hiveFallbackConfigured && getUsageLimitState().active) {
+                requestProvider = 'hive';
+                requestAdapter = hiveAdapter;
+                requestModel = hiveAdapter.getModel();
+                if (!_hiveFallbackLogged) {
+                    _hiveFallbackLogged = true;
+                    log(`[HiveFallback] OpenAI usage cooldown active — using ${requestModel}`, 'WARN');
+                }
+            }
+
             // BAT-315: Provider-agnostic tool formatting + request body building
             // DeerFlow P1: Strip tools on loop-break final iteration so model can only respond with text
             // DeerFlow P2: Per-provider tool strategy — Claude gets full schemas + caching,
@@ -2969,7 +2992,7 @@ async function chat(chatId, userMessage, options = {}) {
             // can't handle tool_search discovery pattern (leak raw XML instead of proper calls).
             // Re-enable per-model when we can detect tool-use capability from OpenRouter API.
             const rawTools = _loopFinalIteration ? [] : (_deps.getTools ? _deps.getTools() : []);
-            const formattedTools = adapter.formatTools(rawTools, chatId);
+            const formattedTools = requestAdapter.formatTools(rawTools, chatId);
 
             // Context token estimation: check usage before API call, adaptively trim if needed.
             // Cache systemChars for the turn (stable). toolChars recomputed each iteration
@@ -2981,7 +3004,7 @@ async function chat(chatId, userMessage, options = {}) {
 
             // DeerFlow P2: Summarize old messages before adaptive trim drops them.
             // Reuse ctx for both summarization check and trim check to avoid duplicate logging.
-            let ctx = checkContextUsage(systemBlocks, messages, formattedTools, activeModel, turnId, _ctxCache);
+            let ctx = checkContextUsage(systemBlocks, messages, formattedTools, requestModel, turnId, _ctxCache);
             log(`[ContextBudget] ${JSON.stringify({
                 turnId,
                 chatId: String(chatId || ''),
@@ -3016,7 +3039,7 @@ async function chat(chatId, userMessage, options = {}) {
                     // only sanitizes when it actually trims.
                     sanitizeConversation(messages, turnId);
                     // Messages changed — recompute context usage
-                    ctx = checkContextUsage(systemBlocks, messages, formattedTools, activeModel, turnId, _ctxCache);
+                    ctx = checkContextUsage(systemBlocks, messages, formattedTools, requestModel, turnId, _ctxCache);
                 }
             }
             // Trim-recheck loop: keep trimming until safe or we hit the message floor
@@ -3027,7 +3050,7 @@ async function chat(chatId, userMessage, options = {}) {
                 // nothing; re-running it only pays for more full-payload
                 // JSON.stringify walks in checkContextUsage.
                 if (adaptiveTrim(messages, ctx.usage, turnId, _turnAnchor) === 0) break;
-                ctx = checkContextUsage(systemBlocks, messages, formattedTools, activeModel, turnId, _ctxCache);
+                ctx = checkContextUsage(systemBlocks, messages, formattedTools, requestModel, turnId, _ctxCache);
                 trimPasses++;
             }
             // Defensive: re-sanitize after trim to fix any orphaned tool pairs
@@ -3061,11 +3084,11 @@ async function chat(chatId, userMessage, options = {}) {
                 try { return _runtimeState ? _runtimeState.read() : null; }
                 catch (_) { return null; }
             })();
-            let _registryProviderId = adapter.id;
+            let _registryProviderId = requestAdapter.id;
             let _authForRegistry;
-            if (adapter.id === 'openai') {
+            if (requestAdapter.id === 'openai') {
                 _authForRegistry = OPENAI_AUTH_TYPE;
-            } else if (adapter.id === 'custom' && CUSTOM_FORMAT === 'responses') {
+            } else if (requestAdapter.id === 'custom' && CUSTOM_FORMAT === 'responses') {
                 _registryProviderId = 'openai';
                 _authForRegistry = 'api_key';
             } else {
@@ -3101,7 +3124,7 @@ async function chat(chatId, userMessage, options = {}) {
             const effectiveSynthetic = isHeartbeatChat ? 'heartbeat' : callerSynthetic;
             const requestOptions = {
                 reasoningEnabled: !!(_liveRtState && _liveRtState.reasoningEnabled),
-                reasoningSupport: reasoningSupportFor(_registryProviderId, activeModel, _authForRegistry),
+                reasoningSupport: reasoningSupportFor(_registryProviderId, requestModel, _authForRegistry),
                 customEchoOverride: !!(_liveRtState && _liveRtState.customEchoReasoning),
                 reasoningMode: effectiveReasoningMode,
                 synthetic: effectiveSynthetic,
@@ -3138,8 +3161,8 @@ async function chat(chatId, userMessage, options = {}) {
             // report has the full context to triage from one log line.
             const _userToggleWouldEmit = requestOptions.reasoningEnabled
                 && requestOptions.reasoningSupport === 'yes';
-            const _modelIsCodex = typeof activeModel === 'string'
-                && activeModel.includes('codex');
+            const _modelIsCodex = typeof requestModel === 'string'
+                && requestModel.includes('codex');
             // R3 Copilot: Custom with CUSTOM_FORMAT='responses' DELEGATES
             // to openai.formatRequest, which carries OpenAI's transport-
             // required exceptions (OAuth + codex models). Pre-fix the
@@ -3150,11 +3173,11 @@ async function chat(chatId, userMessage, options = {}) {
             // Custom-Responses as the OpenAI Responses transport here
             // mirrors what the delegate actually does, so the log
             // reflects effective behavior.
-            const _usesOpenAIResponsesTransport = (PROVIDER === 'openai')
-                || (PROVIDER === 'custom' && CUSTOM_FORMAT === 'responses');
+            const _usesOpenAIResponsesTransport = (requestProvider === 'openai')
+                || (requestProvider === 'custom' && CUSTOM_FORMAT === 'responses');
             const _effectiveTransportProvider = _usesOpenAIResponsesTransport
                 ? 'openai'
-                : PROVIDER;
+                : requestProvider;
             const _effectiveTransportAuth = _usesOpenAIResponsesTransport
                 ? OPENAI_AUTH_TYPE
                 : AUTH_TYPE;
@@ -3168,7 +3191,7 @@ async function chat(chatId, userMessage, options = {}) {
                     _SUPPRESSION_REASONS.SYNTHETIC_HEARTBEAT,
                     `chatId=${String(chatId).slice(0, 32)} provider=${_effectiveTransportProvider} `
                     + `auth=${_effectiveTransportAuth} `
-                    + `model=${String(activeModel).slice(0, 48)}`,
+                    + `model=${String(requestModel).slice(0, 48)}`,
                 );
             }
 
@@ -3193,13 +3216,13 @@ async function chat(chatId, userMessage, options = {}) {
                 anchorGuardStats.repairs++;
                 log(`[AnchorGuard] ${JSON.stringify({
                     turnId, taskId, step: stepCount,
-                    adapter: (adapter && adapter.id) || activeModel,
+                    adapter: (requestAdapter && requestAdapter.id) || requestModel,
                     event: 'anchor_missing_repaired', len: messages.length,
                     cumulative: anchorGuardStats.repairs,
                 })}`, anchorGuardStats.repairs <= 3 ? 'ERROR' : 'DEBUG');
             }
-            const apiMessages = adapter.toApiMessages(messages, activeModel, requestOptions);
-            const body = adapter.formatRequest(activeModel, 4096, systemBlocks, apiMessages, formattedTools, requestOptions);
+            const apiMessages = requestAdapter.toApiMessages(messages, requestModel, requestOptions);
+            const body = requestAdapter.formatRequest(requestModel, 4096, systemBlocks, apiMessages, formattedTools, requestOptions);
 
             // BAT-549 Commit 6: extended-thinking status indicator.
             // Per v4 contract, the bubble appears ONLY when all three
@@ -3237,6 +3260,7 @@ async function chat(chatId, userMessage, options = {}) {
                     turnId,
                     iteration: stepCount,
                     background: effectiveSynthetic === 'heartbeat' || String(chatId).startsWith('cron:'),
+                    providerOverride: requestProvider,
                 });
             } finally {
                 // Codex v3/v4 sign-off adjustment: cleanup is
@@ -3247,6 +3271,44 @@ async function chat(chatId, userMessage, options = {}) {
                 // The .catch swallows so a deletion failure never
                 // surfaces to the user; status is bonus UX.
                 thinkingStatus.cleanup().catch(() => {});
+            }
+
+            if (res.status !== 200 && requestProvider === 'openai' && hiveFallbackConfigured) {
+                const primaryErr = classifyApiError(res.status, res.data, 'openai');
+                if (primaryErr.type === 'usage_limit') {
+                    requestProvider = 'hive';
+                    requestAdapter = hiveAdapter;
+                    requestModel = hiveAdapter.getModel();
+                    _hiveFallbackLogged = true;
+                    log(`[HiveFallback] OpenAI usage_limit_reached — retrying same turn via ${requestModel}`, 'WARN');
+
+                    // Rebuild the SAME neutral turn for Hive's Chat Completions wire shape.
+                    // Persistent memory/history are untouched; only transport+model change.
+                    const hiveSystemBlocks = hiveAdapter.formatSystemPrompt(
+                        stablePrompt,
+                        dynamicPrompt + resumeBlock,
+                        'api_key'
+                    );
+                    const hiveTools = hiveAdapter.formatTools(rawTools, chatId);
+                    const hiveMessages = hiveAdapter.toApiMessages(messages, requestModel, {
+                        ...requestOptions,
+                        reasoningSupport: 'unknown',
+                    });
+                    const hiveBody = hiveAdapter.formatRequest(
+                        requestModel,
+                        4096,
+                        hiveSystemBlocks,
+                        hiveMessages,
+                        hiveTools,
+                        { ...requestOptions, reasoningSupport: 'unknown' }
+                    );
+                    res = await claudeApiCall(hiveBody, chatId, {
+                        turnId,
+                        iteration: stepCount,
+                        background: effectiveSynthetic === 'heartbeat' || String(chatId).startsWith('cron:'),
+                        providerOverride: 'hive',
+                    });
+                }
             }
 
             if (res.status !== 200) {
@@ -3433,7 +3495,8 @@ async function chat(chatId, userMessage, options = {}) {
                     continue;
                 }
 
-                const errClass = classifyApiError(res.status, res.data);
+                const responseProvider = res._providerId || requestProvider;
+                const errClass = classifyApiError(res.status, res.data, responseProvider);
                 const userText = errClass.userMessage || `API error: ${res.status}`;
                 log(`[OutputPath] ${JSON.stringify({
                     turnId, chatId: String(chatId), errorClass: errClass.type,
@@ -3454,8 +3517,10 @@ async function chat(chatId, userMessage, options = {}) {
             // should re-attempt step 1 first.
             _reasoningRecoveryStep = 0;
 
-            // BAT-315: Parse response through adapter into neutral format
-            const parsed = adapter.fromApiResponse(res.data);
+            // BAT-315: Parse response through the adapter that actually answered.
+            const responseProvider = res._providerId || requestProvider;
+            const responseAdapter = getAdapter(responseProvider);
+            const parsed = responseAdapter.fromApiResponse(res.data);
             // Keep raw response for fallback text extraction later
             response = res.data;
             response._parsed = parsed;
