@@ -596,7 +596,9 @@ const cronService = {
         const payloadKind = job.payload?.kind;
         if (payloadKind === 'agentTurn') {
             const usageState = getUsageLimitState();
-            if (usageState.active) {
+            const hiveFallbackConfigured = typeof process.env.HIVE_API_KEY === 'string'
+                && process.env.HIVE_API_KEY.trim().length > 0;
+            if (usageState.active && !hiveFallbackConfigured) {
                 const deferMs = Math.max(60 * 1000, usageState.remainingMs);
                 job.state.runningAtMs = undefined;
                 job.state.nextRunAtMs = Date.now() + deferMs;
@@ -612,6 +614,9 @@ const cronService = {
                 log(`[Cron] Deferred AI job ${job.id} until usage cooldown ends (${Math.ceil(deferMs / 60000)}min)`, 'WARN');
                 saveCronStore(this.store);
                 return;
+            }
+            if (usageState.active && hiveFallbackConfigured) {
+                log(`[Cron] OpenAI usage cooldown active — running ${job.id} via Hive DeepSeek fallback`, 'INFO');
             }
         }
 
