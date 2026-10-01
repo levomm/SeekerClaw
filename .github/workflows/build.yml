@@ -116,6 +116,7 @@ jobs:
             shutdown-flush-durability-only \
             logging-substrate \
             history-anchor-trim \
+            hive-fallback \
             log-safe \
             turn-goal \
             checkpoint-provenance \
