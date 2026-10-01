@@ -593,6 +593,7 @@ function httpChatCompletionsStreamingRequest(options, body = null) {
             // Chat Completions SSE accumulators
             res.setEncoding('utf8');
             let textContent = '';
+            let reasoningContent = '';
             const toolCalls = {};    // index → { id, name, arguments }
             let finishReason = null;
             let usage = null;
@@ -616,6 +617,7 @@ function httpChatCompletionsStreamingRequest(options, body = null) {
                         message: {
                             role: 'assistant',
                             content: textContent || null,
+                            reasoning_content: reasoningContent || undefined,
                             tool_calls: accToolCalls.length > 0 ? accToolCalls : undefined,
                         },
                         finish_reason: finishReason || 'stop',
@@ -677,6 +679,11 @@ function httpChatCompletionsStreamingRequest(options, body = null) {
                 // Text content delta
                 if (delta.content) textContent += delta.content;
 
+                // DeepSeek-style reasoning delta. Preserve it verbatim so the
+                // provider adapter can echo it on the next tool-loop request when
+                // the model contract requires reasoning_content round-tripping.
+                if (delta.reasoning_content) reasoningContent += delta.reasoning_content;
+
                 // Tool call deltas — accumulate by index
                 if (delta.tool_calls) {
                     for (const tc of delta.tool_calls) {
@@ -726,7 +733,7 @@ function httpChatCompletionsStreamingRequest(options, body = null) {
                 }
                 if (!settled) {
                     // Stream ended without [DONE] — build from accumulated data
-                    if (textContent || Object.keys(toolCalls).length > 0) {
+                    if (textContent || reasoningContent || Object.keys(toolCalls).length > 0) {
                         settle(resolve, { status: 200, data: buildResponse(), headers: res.headers });
                     } else {
                         const err = new Error('Stream ended before [DONE]');
