@@ -42,6 +42,7 @@ function buildHeaders(apiKey) {
     const key = apiKey || getApiKey();
     return {
         'Content-Type': 'application/json',
+        'Accept': 'text/event-stream',
         'Authorization': `Bearer ${key}`,
     };
 }
