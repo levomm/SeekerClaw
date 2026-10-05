@@ -543,6 +543,7 @@ function normalizeTelegramMessage(msg) {
         text: (msg.text || '').trim(),
         caption: (msg.caption || '').trim(),
         messageId: msg.message_id,
+        messageThreadId: Number.isInteger(msg.message_thread_id) ? msg.message_thread_id : null,
         media: normalizedMedia,
         replyTo,
         quoteText,
