@@ -51,6 +51,7 @@ const tools = [
             type: 'object',
             properties: {
                 text: { type: 'string', description: 'Message text to send. Markdown formatting supported. Up to 32768 UTF-8 bytes when Rich Messages are enabled (the classic fallback handles ~4096); for long multi-message responses, reply normally instead.' },
+                message_thread_id: { type: 'number', description: 'Optional Telegram forum topic ID. When set, send the message inside that topic.' },
                 buttons: {
                     type: 'array',
                     description: 'Optional inline keyboard rows for NAVIGATION / non-sensitive choices ONLY. Each button: "text" (display label), "callback_data" (value sent back when tapped, max 64 bytes), optional "style" ("destructive" red / "primary" blue). A button tap is just an ordinary chat message \u2014 it does NOT authorize anything. Do NOT use buttons to confirm/approve/cancel fund-moving or confirmation-gated actions (swaps, sends, payments, wallet/cap changes) \u2014 those have a dedicated system confirmation gate that asks for YES. Example: [[{"text": "\uD83D\uDCCA Show more", "callback_data": "show_more", "style": "primary"}, {"text": "\uD83D\uDD04 Refresh", "callback_data": "refresh"}]]',
@@ -72,6 +73,63 @@ const tools = [
         }
     },
     {
+        name: 'telegram_topic_create',
+        description: 'Create a forum topic in the current Telegram supergroup. The bot must be an admin with Manage Topics permission. Returns message_thread_id. Use only in the current owner-authorized group.',
+        input_schema: {
+            type: 'object',
+            properties: {
+                name: { type: 'string', description: 'Topic name, 1-128 characters' },
+                icon_color: { type: 'number', description: 'Optional Telegram topic icon color integer' }
+            },
+            required: ['name']
+        }
+    },
+    {
+        name: 'telegram_topic_edit',
+        description: 'Rename a forum topic in the current Telegram supergroup. The bot must have Manage Topics permission.',
+        input_schema: {
+            type: 'object',
+            properties: {
+                message_thread_id: { type: 'number', description: 'Forum topic ID' },
+                name: { type: 'string', description: 'New topic name, 1-128 characters' }
+            },
+            required: ['message_thread_id', 'name']
+        }
+    },
+    {
+        name: 'telegram_topic_close',
+        description: 'Close a forum topic in the current Telegram supergroup. The bot must have Manage Topics permission.',
+        input_schema: {
+            type: 'object',
+            properties: {
+                message_thread_id: { type: 'number', description: 'Forum topic ID' }
+            },
+            required: ['message_thread_id']
+        }
+    },
+    {
+        name: 'telegram_topic_reopen',
+        description: 'Reopen a forum topic in the current Telegram supergroup. The bot must have Manage Topics permission.',
+        input_schema: {
+            type: 'object',
+            properties: {
+                message_thread_id: { type: 'number', description: 'Forum topic ID' }
+            },
+            required: ['message_thread_id']
+        }
+    },
+    {
+        name: 'telegram_topic_delete',
+        description: 'Delete a forum topic in the current Telegram supergroup. This removes the topic and its messages. Use only when the owner explicitly asks to delete that topic. The bot must have Manage Topics permission.',
+        input_schema: {
+            type: 'object',
+            properties: {
+                message_thread_id: { type: 'number', description: 'Forum topic ID' }
+            },
+            required: ['message_thread_id']
+        }
+    },
+    {
         name: 'telegram_send_file',
         description: 'Send a file from the workspace to the current Telegram chat. Auto-detects type from extension (photo, video, audio, voice, document). Use for sharing reports, images, exported files, camera captures, or any workspace file with the user. Telegram bot limit: 50MB. Photos up to 10MB are sent as photos; larger images are automatically sent as documents.',
         input_schema: {
@@ -86,6 +144,25 @@ const tools = [
         }
     },
 ];
+
+async function _setTopicState(method, input, chatId, action) {
+    if (!chatId || (typeof chatId === 'string' && isNaN(Number(chatId)))) {
+        return { error: 'Telegram topic tools require an active Telegram group chat' };
+    }
+    const threadId = Number(input.message_thread_id);
+    if (!Number.isInteger(threadId) || threadId <= 0) return { error: 'valid message_thread_id is required' };
+    try {
+        const result = await telegram(method, { chat_id: chatId, message_thread_id: threadId });
+        if (result?.ok) return { ok: true, action, chat_id: chatId, message_thread_id: threadId };
+        const desc = result?.description || ('Topic ' + action + ' failed');
+        if (/not enough rights|manage topics|administrator/i.test(desc)) {
+            return { ok: false, warning: 'Bot needs Telegram admin permission: Manage Topics.', detail: desc };
+        }
+        return { ok: false, warning: desc };
+    } catch (e) {
+        return { error: e.message };
+    }
+}
 
 const handlers = {
     async telegram_react(input, chatId) {
@@ -201,7 +278,14 @@ const handlers = {
 
             // BAT-1050 P1A: try Rich Messages first (flag-gated; shares richTrySend
             // with sendMessage). On non-delivery, fall through to classic HTML/plain.
-            const rich = await richTrySend(chatId, cleaned, null, input.buttons);
+            // Telegram's Rich Message extension is not guaranteed to preserve
+            // forum topic routing. For explicit topic sends use the classic Bot API,
+            // where message_thread_id is part of the documented sendMessage payload.
+            const threadId = Number.isInteger(input.message_thread_id) && input.message_thread_id > 0
+                ? input.message_thread_id : null;
+            const rich = threadId == null
+                ? await richTrySend(chatId, cleaned, null, input.buttons)
+                : { delivered: false };
             if (rich.delivered) {
                 if (rich.ret && rich.ret.messageId != null) {
                     log(`telegram_send: sent rich message ${rich.ret.messageId}`, 'DEBUG');
@@ -220,6 +304,7 @@ const handlers = {
                     text: toTelegramHtml(cleaned),
                     parse_mode: 'HTML',
                 };
+                if (threadId != null) payload.message_thread_id = threadId;
                 if (replyMarkup) payload.reply_markup = replyMarkup;
                 result = await telegram('sendMessage', payload);
                 outcome = classifyTelegramOutcome(result, null);
@@ -240,6 +325,7 @@ const handlers = {
                     chat_id: chatId,
                     text: stripMarkdown(cleaned),
                 };
+                if (threadId != null) payload.message_thread_id = threadId;
                 if (replyMarkup) payload.reply_markup = replyMarkup;
                 result = await telegram('sendMessage', payload);
             }
@@ -257,6 +343,71 @@ const handlers = {
         } catch (e) {
             return { error: e.message };
         }
+    },
+
+    async telegram_topic_create(input, chatId) {
+        if (!chatId || (typeof chatId === 'string' && isNaN(Number(chatId)))) {
+            return { error: 'Telegram topic tools require an active Telegram group chat' };
+        }
+        const name = String(input.name || '').trim();
+        if (!name || name.length > 128) return { error: 'name must be 1-128 characters' };
+        const payload = { chat_id: chatId, name };
+        if (Number.isInteger(input.icon_color)) payload.icon_color = input.icon_color;
+        try {
+            const result = await telegram('createForumTopic', payload);
+            if (result?.ok && result.result?.message_thread_id) {
+                return {
+                    ok: true,
+                    chat_id: chatId,
+                    message_thread_id: result.result.message_thread_id,
+                    name: result.result.name || name,
+                };
+            }
+            const desc = result?.description || 'Topic creation failed';
+            if (/not enough rights|manage topics|administrator|chat not found/i.test(desc)) {
+                return { ok: false, warning: 'Bot needs Telegram admin permission: Manage Topics in this forum supergroup.', detail: desc };
+            }
+            return { ok: false, warning: desc };
+        } catch (e) {
+            return { error: e.message };
+        }
+    },
+
+    async telegram_topic_edit(input, chatId) {
+        if (!chatId || (typeof chatId === 'string' && isNaN(Number(chatId)))) {
+            return { error: 'Telegram topic tools require an active Telegram group chat' };
+        }
+        const threadId = Number(input.message_thread_id);
+        const name = String(input.name || '').trim();
+        if (!Number.isInteger(threadId) || threadId <= 0) return { error: 'valid message_thread_id is required' };
+        if (!name || name.length > 128) return { error: 'name must be 1-128 characters' };
+        try {
+            const result = await telegram('editForumTopic', {
+                chat_id: chatId,
+                message_thread_id: threadId,
+                name,
+            });
+            if (result?.ok) return { ok: true, chat_id: chatId, message_thread_id: threadId, name };
+            const desc = result?.description || 'Topic edit failed';
+            if (/not enough rights|manage topics|administrator/i.test(desc)) {
+                return { ok: false, warning: 'Bot needs Telegram admin permission: Manage Topics.', detail: desc };
+            }
+            return { ok: false, warning: desc };
+        } catch (e) {
+            return { error: e.message };
+        }
+    },
+
+    async telegram_topic_close(input, chatId) {
+        return _setTopicState('closeForumTopic', input, chatId, 'closed');
+    },
+
+    async telegram_topic_reopen(input, chatId) {
+        return _setTopicState('reopenForumTopic', input, chatId, 'reopened');
+    },
+
+    async telegram_topic_delete(input, chatId) {
+        return _setTopicState('deleteForumTopic', input, chatId, 'deleted');
     },
 
     async telegram_send_file(input, chatId) {
