@@ -9,6 +9,10 @@ triggers:
   - "retest vulnerability"
   - "close the finding"
   - "test the patch"
+  - "testi uuesti"
+  - "kontrolli parandust"
+  - "kontrolli turvaparandust"
+  - "kinnita et viga on parandatud"
 ---
 
 # Security Retest
