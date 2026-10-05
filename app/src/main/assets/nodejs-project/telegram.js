@@ -743,8 +743,11 @@ let _richMethodAvailable = null;
 //                      rollout source of truth); not a duplicate (Rich didn't land).
 //   delivered:true  -> sent OR possibly-delivered (transport error) — caller must
 //                      NOT also send via classic (NO-DOUBLE-DELIVERY).
-async function richTrySend(chatId, text, replyTo, buttons) {
+async function richTrySend(chatId, text, replyTo, buttons, opts = {}) {
     if (!RICH_MESSAGES_ENABLED || _richMethodAvailable === false) return { delivered: false };
+    // Keep forum-topic delivery deterministic. The classic Bot API documents
+    // message_thread_id; the Rich extension may not preserve it consistently.
+    if (opts && opts.messageThreadId != null) return { delivered: false };
     // Over the Rich budget -> let the classic chunked path handle it.
     if (Buffer.byteLength(text, 'utf8') > RICH_MAX_BYTES) return { delivered: false };
 
@@ -812,8 +815,11 @@ async function sendMessage(chatId, text, replyTo = null, buttons = null, opts = 
     // parse_mode, no HTML/rich transform. Keeps these messages plain so the
     // future Rich send path and BAT-558 heartbeat behavior are unaffected.
     // Reached via sendMessageSystem() / channel.sendMessageSystem().
+    const messageThreadId = opts && Number.isInteger(opts.messageThreadId) && opts.messageThreadId > 0
+        ? opts.messageThreadId : null;
+
     if (opts && opts.plainOnly) {
-        return sendPlainChunks(chatId, text, replyTo, buttons);
+        return sendPlainChunks(chatId, text, replyTo, buttons, messageThreadId);
     }
 
     // BAT-1050: try Rich Messages first (flag-gated; ON by default). On any
@@ -821,7 +827,7 @@ async function sendMessage(chatId, text, replyTo = null, buttons = null, opts = 
     // classic chunked HTML pipeline below (the rollout source of truth). A
     // possibly-delivered transport error returns { delivered:true } so we do NOT
     // duplicate it on the classic path.
-    const rich = await richTrySend(chatId, text, replyTo, buttons);
+    const rich = await richTrySend(chatId, text, replyTo, buttons, { messageThreadId });
     if (rich.delivered) return rich.ret;
 
     // Telegram max message length is 4096 — use markdown-aware chunking
@@ -844,6 +850,7 @@ async function sendMessage(chatId, text, replyTo = null, buttons = null, opts = 
                 reply_to_message_id: replyTo,
                 parse_mode: 'HTML',
             };
+            if (messageThreadId != null) payload.message_thread_id = messageThreadId;
             if (replyMarkup) payload.reply_markup = replyMarkup;
             const result = await telegram('sendMessage', payload);
             outcome = classifyTelegramOutcome(result, null);
@@ -894,6 +901,7 @@ async function sendMessage(chatId, text, replyTo = null, buttons = null, opts = 
                     text: stripMarkdown(chunk),
                     reply_to_message_id: replyTo,
                 };
+                if (messageThreadId != null) payload.message_thread_id = messageThreadId;
                 if (replyMarkup) payload.reply_markup = replyMarkup;
                 const result = await telegram('sendMessage', payload);
                 if (result && result.ok && result.result && result.result.message_id) {
@@ -918,7 +926,7 @@ async function sendMessage(chatId, text, replyTo = null, buttons = null, opts = 
 // transform. Single attempt per chunk (no HTML->plain ladder), so it carries no
 // double-send risk. `text` is already cleanResponse'd + redactSecrets'd by the
 // caller (sendMessage). Used for system/synthetic notices via sendMessageSystem.
-async function sendPlainChunks(chatId, text, replyTo, buttons) {
+async function sendPlainChunks(chatId, text, replyTo, buttons, messageThreadId = null) {
     const chunks = chunkMarkdown(text);
     let lastMessageId = null;
     for (let i = 0; i < chunks.length; i++) {
@@ -927,6 +935,7 @@ async function sendPlainChunks(chatId, text, replyTo, buttons) {
         const replyMarkup = (isLastChunk && buttons) ? { inline_keyboard: buttons } : undefined;
         try {
             const payload = { chat_id: chatId, text: chunk, reply_to_message_id: replyTo };
+            if (messageThreadId != null) payload.message_thread_id = messageThreadId;
             if (replyMarkup) payload.reply_markup = replyMarkup;
             const result = await telegram('sendMessage', payload);
             if (result && result.ok && result.result && result.result.message_id) {

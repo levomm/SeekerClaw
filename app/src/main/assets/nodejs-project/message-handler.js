@@ -57,7 +57,7 @@ function assertInit() {
 //                     string already delivered this turn is suppressed. Guards the
 //                     reasoning-content-400 recovery replay (chat() re-emits the same
 //                     pre-tool text after quarantine + retry). The final send passes none.
-async function deliverAgentText(chatId, rawText, messageId, replyToDefault, dedupSet = null) {
+async function deliverAgentText(chatId, rawText, messageId, replyToDefault, dedupSet = null, messageThreadId = null) {
     assertInit();
     if (typeof rawText !== 'string') return false;
     if (containsSilentReply(rawText)) deps.log('[Audit] Agent sent SILENT_REPLY', 'DEBUG');
@@ -88,7 +88,13 @@ async function deliverAgentText(chatId, rawText, messageId, replyToDefault, dedu
         return false;
     }
 
-    await deps.sendMessage(chatId, text, replyTo);
+    await deps.sendMessage(
+        chatId,
+        text,
+        replyTo,
+        null,
+        messageThreadId != null ? { messageThreadId } : {},
+    );
     if (dedupSet) dedupSet.add(text);
     return true;
 }
@@ -1035,7 +1041,7 @@ async function handleMessage(normalized) {
     // the durability acknowledgement and the process kill. A controlled Stop resolves in well
     // under a second, so this drops at most a message that arrives inside that teardown window.
     if (require('./quiesce').isQuiesced()) return;
-    const { chatId, senderId, text: rawText, caption, messageId, media, replyTo, quoteText } = normalized;
+    const { chatId, senderId, text: rawText, caption, messageId, messageThreadId = null, media, replyTo, quoteText } = normalized;
     const combinedText = (rawText || caption || '').trim();
     if (!combinedText && !media) return;
 
@@ -1143,7 +1149,13 @@ async function handleMessage(normalized) {
                 resumedFromTaskId = response.resumedFromTaskId || null;
                 text = 'continue';
             } else if (response) {
-                await deps.sendMessage(chatId, response, messageId);
+                await deps.sendMessage(
+                    chatId,
+                    response,
+                    messageId,
+                    null,
+                    messageThreadId != null ? { messageThreadId } : {},
+                );
                 await statusReaction.clear();
                 return;
             }
@@ -1313,7 +1325,7 @@ async function handleMessage(normalized) {
         const seenInterim = new Set();
         const sendInterim = async (rawText) => {
             try {
-                await deliverAgentText(chatId, rawText, messageId, null, seenInterim);
+                await deliverAgentText(chatId, rawText, messageId, null, seenInterim, messageThreadId);
             } catch (e) {
                 deps.log(`[Interim] send failed (continuing): ${e && e.message ? e.message : String(e)}`, 'WARN');
             }
@@ -1336,7 +1348,7 @@ async function handleMessage(normalized) {
         // quote-replying the triggering message; no dedup on the final send. A false
         // return means the response was only protocol tokens (SILENT_REPLY / HEARTBEAT_OK
         // / empty / a bare [[reply_to_current]]) → nothing to deliver.
-        const finalSent = await deliverAgentText(chatId, response, messageId, messageId);
+        const finalSent = await deliverAgentText(chatId, response, messageId, messageId, null, messageThreadId);
         if (!finalSent) {
             deps.log('Agent returned protocol-token-only response, discarding', 'DEBUG');
             await statusReaction.clear();
@@ -1350,7 +1362,13 @@ async function handleMessage(normalized) {
     } catch (error) {
         deps.log(`Error: ${error.message}`, 'ERROR');
         await statusReaction.setError();
-        await deps.sendMessage(chatId, `Error: ${deps.redactSecrets(error.message)}`, messageId);
+        await deps.sendMessage(
+            chatId,
+            `Error: ${deps.redactSecrets(error.message)}`,
+            messageId,
+            null,
+            messageThreadId != null ? { messageThreadId } : {},
+        );
     }
 }
 
