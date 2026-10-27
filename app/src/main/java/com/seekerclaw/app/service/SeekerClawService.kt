@@ -152,6 +152,93 @@ class SeekerClawService : Service() {
     private val scopeJob = SupervisorJob()
     private val scope = CoroutineScope(Dispatchers.IO + scopeJob)
     private var androidBridge: AndroidBridge? = null
+    @Volatile private var currentBridgeToken: String? = null
+    @Volatile private var shuttingDown = false
+    private fun shouldRunBridge(): Boolean =
+        !shuttingDown && scopeJob.isActive && !userStopSignal(applicationContext).isStopped()
+
+    private val bridgeRecovery by lazy {
+        BridgeRecovery(
+            shouldRun = { shouldRunBridge() },
+            probe = { isAndroidBridgeHealthy() },
+            start = {
+                val token = currentBridgeToken ?: ServiceState.bridgeToken
+                token != null && startAndroidBridge(token, "recovery")
+            },
+            waitMs = { ms ->
+                withTimeoutOrNull(ms) {
+                    while (shouldRunBridge()) delay(100L)
+                }
+            },
+            onUnhealthy = {
+                if (shouldRunBridge()) ServiceState.updateStatus(ServiceStatus.ERROR)
+            },
+            onAttempt = { attempt ->
+                LogCollector.append("[Service] AndroidBridge recovery attempt $attempt/3", LogLevel.WARN)
+            },
+            onExhausted = {
+                LogCollector.append("[Service] AndroidBridge recovery exhausted — remaining ERROR; no automatic process restart", LogLevel.ERROR)
+            },
+            onHealthy = {
+                if (canPublishRunning(NodeBridge.isAlive(), shouldRunBridge()) &&
+                    ServiceState.status.value != ServiceStatus.RUNNING
+                ) {
+                    ServiceState.updateStatus(ServiceStatus.RUNNING)
+                    LogCollector.append("[Service] Node.js and AndroidBridge healthy — Claw Engine is now RUNNING")
+                }
+            },
+        )
+    }
+
+    private suspend fun checkBridgeHealth() {
+        if (shouldRunBridge() && NodeBridge.isAlive()) bridgeRecovery.ensureHealthy()
+    }
+
+    private fun startAndroidBridge(token: String, reason: String): Boolean {
+        runCatching { androidBridge?.shutdown() }
+        androidBridge = null
+        return try {
+            androidBridge = AndroidBridge(applicationContext, token)
+            androidBridge?.start()
+            currentBridgeToken = token
+            LogCollector.append("[Service] AndroidBridge started on 127.0.0.1:8765 (auth required, reason=$reason)")
+            true
+        } catch (e: Exception) {
+            runCatching { androidBridge?.shutdown() }
+            androidBridge = null
+            LogCollector.append(
+                "[Service] Failed to start AndroidBridge: ${e.javaClass.simpleName}: ${e.message ?: "no message"}",
+                LogLevel.ERROR,
+            )
+            false
+        }
+    }
+
+    private fun isAndroidBridgeHealthy(): Boolean {
+        // An unrelated app listening on 8765 is not our bridge.
+        if (androidBridge?.isAlive != true) return false
+        val token = currentBridgeToken ?: ServiceState.bridgeToken ?: return false
+        var conn: java.net.HttpURLConnection? = null
+        return try {
+            conn = java.net.URL("http://127.0.0.1:8765/ping").openConnection() as java.net.HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.connectTimeout = 500
+            conn.readTimeout = 500
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty("X-Bridge-Token", token)
+            conn.doOutput = true
+            conn.outputStream.use { it.write("{}".toByteArray(Charsets.UTF_8)) }
+            if (conn.responseCode != 200) false else {
+                val body = conn.inputStream.bufferedReader().use { it.readText() }
+                val result = org.json.JSONObject(body)
+                result.optString("status") == "ok" && result.optString("bridge") == "AndroidBridge"
+            }
+        } catch (_: Exception) {
+            false
+        } finally {
+            conn?.disconnect()
+        }
+    }
 
     /**
      * Read any bytes appended to `node_debug.log` since `nodeDebugLastPos`,
@@ -471,22 +558,25 @@ class SeekerClawService : Service() {
         // then leaves the UI thinking deploy failed even though
         // NodeBridge is still alive on the original instance.
         //
-        // Guard: if NodeBridge is already alive, just re-publish
-        // RUNNING (so any UI process that observed STARTING/STOPPED
-        // catches up) and return. Don't touch NodeBridge / AndroidBridge
-        // / Watchdog — they're all still running from the first
-        // onStartCommand. Preserve the existing serviceStartTimeMs so
-        // uptime is computed against the actual start, not this no-op
-        // re-entry.
+        // Re-entry must not restart Node/config/workspace or blindly publish RUNNING.
+        // Check the bridge off-main using the SAME bounded recovery budget. Preserve
+        // the actual service start time across repeated start requests.
+        if (userStopSignal(applicationContext).isStopped()) {
+            ServiceState.updateStatus(ServiceStatus.STOPPED)
+            stopSelf()
+            return START_NOT_STICKY
+        }
         if (NodeBridge.isAlive()) {
-            ServiceState.updateStatus(ServiceStatus.RUNNING)
+            // Don't do loopback I/O on the Android main looper, reset retry budgets,
+            // or reinitialize Node/config/workspace on repeated start requests.
+            scope.launch { checkBridgeHealth() }
             if (ServiceState.serviceStartTimeMs.value == 0L) {
                 // Defensive: if somehow the start time was cleared
                 // while NodeBridge stayed alive (shouldn't happen, but
                 // covers a stale-state scenario), set it to now.
                 ServiceState.setServiceStartTimeMs(System.currentTimeMillis())
             }
-            LogCollector.append("[Service] Start requested while already running; re-published RUNNING")
+            LogCollector.append("[Service] Start requested while Node.js is running; checking AndroidBridge off-main")
             return START_STICKY
         }
 
@@ -608,18 +698,12 @@ class SeekerClawService : Service() {
         }
 
         // Start Android Bridge (HTTP server for Node.js <-> Kotlin IPC)
-        // Bound to 127.0.0.1 only, requires per-boot auth token
-        try {
-            androidBridge = AndroidBridge(applicationContext, bridgeToken)
-            androidBridge?.start()
-            LogCollector.append("[Service] AndroidBridge started on 127.0.0.1:8765 (auth required)")
-        } catch (e: Exception) {
-            LogCollector.append("[Service] Failed to start AndroidBridge: ${e.javaClass.simpleName}", LogLevel.ERROR)
-        }
-
-        // Mark as running
-        ServiceState.updateStatus(ServiceStatus.RUNNING)
-        LogCollector.append("[Service] Claw Engine is now RUNNING")
+        // Bound to 127.0.0.1 only, requires per-boot auth token. This is
+        // required for runtime health: Node can answer AI calls while the
+        // Android IPC channel is dead, so don't hide bridge failure behind
+        // RUNNING.
+        currentBridgeToken = bridgeToken
+        scope.launch { checkBridgeHealth() }
 
         // BAT-582 Phase 3: periodic sweep of stale Burner Wallet cap
         // reservations. Every 30s, any reservation whose expiresAtMs has
@@ -699,12 +783,19 @@ class SeekerClawService : Service() {
         // we need to kill this :node process and let Android restart it (START_STICKY).
         Watchdog.start(
             onDead = {
+                if (!shouldRunBridge()) return@start
                 LogCollector.append("[Service] Watchdog detected Node.js death — killing process for restart", LogLevel.ERROR)
                 NodeBridge.stop()
                 // Kill this process so Android restarts the :node service process
                 android.os.Process.killProcess(android.os.Process.myPid())
-            }
-)
+            },
+            isHealthy = {
+                // Bridge recovery is bounded and stays ERROR on exhaustion. Only Node
+                // death uses the existing process restart path; a bind conflict never does.
+                if (shouldRunBridge() && NodeBridge.isAlive()) checkBridgeHealth()
+                !shouldRunBridge() || NodeBridge.isAlive()
+            },
+        )
 
         // Watch Node.js debug log and forward new lines to LogCollector.
         //
@@ -829,6 +920,8 @@ class SeekerClawService : Service() {
     }
 
     override fun onDestroy() {
+        shuttingDown = true // fence recovery BEFORE durability flush / listener teardown
+        Watchdog.stop()
         LogCollector.append("[Service] Stopping Claw Engine...")
         // BAT-525 / BAT-1155: flush Node BEFORE everything else — the bridge token + Node process
         // must both still be alive for the loopback POST /shutdown/flush to land, and it precedes
@@ -857,7 +950,12 @@ class SeekerClawService : Service() {
         nodeDebugObserver?.stopWatching()
         nodeDebugObserver = null
         Watchdog.stop()
-        androidBridge?.shutdown()
+        runBlocking {
+            bridgeRecovery.shutdown {
+                androidBridge?.shutdown()
+                androidBridge = null
+            }
+        }
         NodeBridge.stop()
         wakeLock?.let {
             if (it.isHeld) it.release()
@@ -867,7 +965,7 @@ class SeekerClawService : Service() {
         }
         ServiceState.clearBridgeToken()
         // Preserve ERROR status (e.g., owner not configured) — only reset to STOPPED on clean exits.
-        if (ServiceState.status.value != ServiceStatus.ERROR) {
+        if (userStopSignal(applicationContext).isStopped() || ServiceState.status.value != ServiceStatus.ERROR) {
             ServiceState.updateStatus(ServiceStatus.STOPPED)
         }
         // BAT-522: clear the persisted start timestamp so the next UI
@@ -1006,6 +1104,8 @@ class SeekerClawService : Service() {
         // elapses, the durable on-disk fence/marker still protects the next boot.
         private const val ONDESTROY_FLUSH_WAIT_MS = 6_000L
         private val restartHandler = Handler(Looper.getMainLooper())
+        private fun userStopSignal(context: Context) =
+            UserStopSignal(File(context.filesDir, "service_user_stopped"))
 
         // BAT-1155 blocker-1: the pre-stop durability gate does blocking loopback I/O
         // (Node flush) + a disk CAS, so it MUST run off the main thread or it ANRs.
@@ -1052,7 +1152,9 @@ class SeekerClawService : Service() {
         // "active" and rejoin a newer lifecycle.
         private val leaseRenewGen = java.util.concurrent.atomic.AtomicInteger(0)
 
-        fun start(context: Context) {
+        fun start(context: Context, userInitiated: Boolean = true) {
+            val stopSignal = userStopSignal(context)
+            if (userInitiated) stopSignal.explicitStart() else if (stopSignal.isStopped()) return
             restartHandler.removeCallbacksAndMessages(null)
             // Cancel any lingering lease renewer (esp. from a restart's stop phase) BEFORE booting
             // a new :node, so an old renewer can never re-quiesce the freshly-started process.
@@ -1066,13 +1168,16 @@ class SeekerClawService : Service() {
          * teardown so a mid-flight token rotation is either persisted or fail-closed
          * marked — never killed into a family-revoking replay (BAT-1155 blocker-1).
          */
-        fun stop(context: Context) {
+        fun stop(context: Context, userInitiated: Boolean = true) {
+            if (userInitiated) userStopSignal(context).stop()
             restartHandler.removeCallbacksAndMessages(null)
             stopLeaseRenewal() // cancel any renewer from a prior stop before starting a new gate
             stopWithDurability(context.applicationContext, attempt = 0, onStopped = null)
         }
 
         fun restart(context: Context, delayMs: Long = 1200L) {
+            // An explicit restart is allowed; a later STOP must veto its delayed start.
+            userStopSignal(context).explicitStart()
             restartHandler.removeCallbacksAndMessages(null)
             stopLeaseRenewal()
             val appCtx = context.applicationContext
@@ -1080,7 +1185,7 @@ class SeekerClawService : Service() {
             // A restart of a live oauth family is just as capable of stranding a rotation
             // as a plain Stop, so it goes through the same gate.
             stopWithDurability(appCtx, attempt = 0) {
-                restartHandler.postDelayed({ start(appCtx) }, delayMs)
+                restartHandler.postDelayed({ start(appCtx, userInitiated = false) }, delayMs)
             }
         }
 
@@ -1216,7 +1321,7 @@ class SeekerClawService : Service() {
             runCatching {
                 ServiceState.init(appCtx)
                 // Mirror the same guard as onDestroy() — don't wipe ERROR status on a user-stop.
-                if (ServiceState.status.value != ServiceStatus.ERROR) {
+                if (userStopSignal(appCtx).isStopped() || ServiceState.status.value != ServiceStatus.ERROR) {
                     ServiceState.updateStatus(ServiceStatus.STOPPED)
                 }
                 // BAT-522: clear the persisted start timestamp so the next UI

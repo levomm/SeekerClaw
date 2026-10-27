@@ -18,7 +18,10 @@ object Watchdog {
     private val scope = CoroutineScope(Dispatchers.IO)
     private var missedChecks = 0
 
-    fun start(onDead: () -> Unit) {
+    fun start(
+        onDead: () -> Unit,
+        isHealthy: suspend () -> Boolean = { NodeBridge.isAlive() },
+    ) {
         stop()
         missedChecks = 0
         LogCollector.append("[Watchdog] Started (interval=${CHECK_INTERVAL_MS / 1000}s, deadAfter=$DEAD_AFTER_CHECKS missed checks)")
@@ -30,17 +33,17 @@ object Watchdog {
             while (isActive) {
                 delay(CHECK_INTERVAL_MS)
 
-                if (!NodeBridge.isAlive()) {
+                if (!isHealthy()) {
                     missedChecks++
-                    LogCollector.append("[Watchdog] Node.js not running (missed=$missedChecks/$DEAD_AFTER_CHECKS)", LogLevel.WARN)
+                    LogCollector.append("[Watchdog] Runtime unhealthy (missed=$missedChecks/$DEAD_AFTER_CHECKS)", LogLevel.WARN)
                     if (missedChecks >= DEAD_AFTER_CHECKS) {
-                        LogCollector.append("[Watchdog] Node.js unresponsive, triggering restart...", LogLevel.ERROR)
+                        LogCollector.append("[Watchdog] Runtime unhealthy, triggering restart...", LogLevel.ERROR)
                         onDead()
                         missedChecks = 0
                     }
                 } else {
                     if (missedChecks > 0) {
-                        LogCollector.append("[Watchdog] Node.js recovered after $missedChecks missed checks")
+                        LogCollector.append("[Watchdog] Runtime recovered after $missedChecks missed checks")
                     }
                     missedChecks = 0
                 }

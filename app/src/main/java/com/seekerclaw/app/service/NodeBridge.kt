@@ -123,8 +123,7 @@ object NodeBridge {
             try {
                 LogCollector.append("[NodeBridge] Entry: $entryPoint")
 
-                ServiceState.updateStatus(ServiceStatus.RUNNING)
-
+                // SeekerClawService publishes RUNNING only after authenticated bridge health succeeds.
                 // This call BLOCKS the thread until Node.js exits
                 val exitCode = startNodeWithArguments(
                     arrayOf("node", entryPoint, workDir)
