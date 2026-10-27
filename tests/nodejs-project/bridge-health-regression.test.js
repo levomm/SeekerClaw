@@ -89,11 +89,39 @@ test('service wiring checks bridge off-main on reentry and does not restart Node
     assert.match(reentry, /scope\.launch \{ checkBridgeHealth\(\) \}/);
     assert(!reentry.includes('updateStatus(ServiceStatus.RUNNING)'));
     assert.match(service, /remaining ERROR; no automatic process restart/);
-    assert.match(service, /!shouldRunBridge\(\) \|\| NodeBridge\.isAlive\(\)/);
+    assert.match(service, /checkHealth = \{/);
+    assert.match(service, /val bridgeHealthy = checkBridgeHealth\(\)/);
+    assert.match(service, /runtimeHealth\(\s*nodeAlive = NodeBridge\.isAlive\(\),\s*bridgeHealthy = bridgeHealthy,\s*serviceRequested = shouldRunBridge\(\)/);
     assert.match(service, /start\(appCtx, userInitiated = false\)/);
     assert.match(service, /if \(userInitiated\) userStopSignal\(context\)\.stop\(\)/);
     const node = fs.readFileSync(path.join(serviceDir, 'NodeBridge.kt'), 'utf8');
     assert(!node.includes('updateStatus(ServiceStatus.RUNNING)'));
     const boot = fs.readFileSync(path.join(serviceDir, '../receiver/BootReceiver.kt'), 'utf8');
     assert.match(boot, /start\(context, userInitiated = false\)/);
+});
+
+test('watchdog consumes both health signals; only Node death enters process restart path', () => {
+    const watchdog = fs.readFileSync(path.join(serviceDir, 'Watchdog.kt'), 'utf8');
+    assert.match(watchdog, /val health = checkHealth\(\)/);
+    const bridgeFailure = watchdog.slice(watchdog.indexOf('RuntimeHealth.BRIDGE_UNAVAILABLE ->'),
+        watchdog.indexOf('RuntimeHealth.HEALTHY ->'));
+    assert.match(bridgeFailure, /runtime remains ERROR, no process restart/);
+    assert(!bridgeFailure.includes('onDead()'));
+    assert.strictEqual((watchdog.match(/onDead\(\)/g) || []).length, 1);
+    const nodeFailure = watchdog.slice(watchdog.indexOf('RuntimeHealth.NODE_UNAVAILABLE ->'),
+        watchdog.indexOf('RuntimeHealth.BRIDGE_UNAVAILABLE ->'));
+    assert.match(nodeFailure, /onDead\(\)/);
+});
+
+test('production ping carries bridge token and requires HTTP 200 plus expected response', () => {
+    const service = fs.readFileSync(path.join(serviceDir, 'SeekerClawService.kt'), 'utf8');
+    const probe = service.slice(service.indexOf('private fun isAndroidBridgeHealthy()'),
+        service.indexOf('private fun isAndroidBridgeHealthy()') + 1800);
+    assert.match(probe, /127\.0\.0\.1:8765\/ping/);
+    assert.match(probe, /setRequestProperty\("X-Bridge-Token", token\)/);
+    assert.match(probe, /conn\.responseCode != 200/);
+    assert.match(probe, /result\.optString\("status"\) == "ok" && result\.optString\("bridge"\) == "AndroidBridge"/);
+    const recovery = fs.readFileSync(path.join(serviceDir, 'BridgeHealth.kt'), 'utf8');
+    assert.match(recovery, /withContext\(Dispatchers\.IO\)/);
+    assert.match(recovery, /mutex\.withLock \{ recoverLocked\(\) \}/);
 });

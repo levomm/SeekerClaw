@@ -190,9 +190,8 @@ class SeekerClawService : Service() {
         )
     }
 
-    private suspend fun checkBridgeHealth() {
-        if (shouldRunBridge() && NodeBridge.isAlive()) bridgeRecovery.ensureHealthy()
-    }
+    private suspend fun checkBridgeHealth(): Boolean =
+        shouldRunBridge() && NodeBridge.isAlive() && bridgeRecovery.ensureHealthy()
 
     private fun startAndroidBridge(token: String, reason: String): Boolean {
         runCatching { androidBridge?.shutdown() }
@@ -789,11 +788,15 @@ class SeekerClawService : Service() {
                 // Kill this process so Android restarts the :node service process
                 android.os.Process.killProcess(android.os.Process.myPid())
             },
-            isHealthy = {
-                // Bridge recovery is bounded and stays ERROR on exhaustion. Only Node
-                // death uses the existing process restart path; a bind conflict never does.
-                if (shouldRunBridge() && NodeBridge.isAlive()) checkBridgeHealth()
-                !shouldRunBridge() || NodeBridge.isAlive()
+            checkHealth = {
+                val bridgeHealthy = checkBridgeHealth()
+                // Re-read lifecycle/Node state AFTER the authenticated probe and bounded
+                // recovery: STOP or Node death during that work must win over a good ping.
+                runtimeHealth(
+                    nodeAlive = NodeBridge.isAlive(),
+                    bridgeHealthy = bridgeHealthy,
+                    serviceRequested = shouldRunBridge(),
+                )
             },
         )
 

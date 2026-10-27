@@ -209,7 +209,7 @@ SeekerClaw is an Android app built for the Solana Seeker phone (also works on an
 
 ## Features — In Progress
 
-- **PR #15 — AndroidBridge health recovery**: authenticated `/ping` verification, three bounded IO recovery attempts (1s/2s/4s), mutex-protected probe/rebind/verify/status and teardown, truthful RUNNING restoration, durable explicit-STOP guard. Review/testing in progress; not merged or deployed. Memory, database and configuration are outside the change scope.
+- **PR #15 — AndroidBridge health recovery**: authenticated `/ping` verification, three bounded IO recovery attempts (1s/2s/4s), mutex-protected probe/rebind/verify/status and teardown, truthful RUNNING restoration, durable explicit-STOP guard. Follow-up on `fix/osz-bridge-recovery`: watchdog explicitly distinguishes HEALTHY / BRIDGE_UNAVAILABLE / NODE_UNAVAILABLE / STOPPED, rather than reporting live Node as healthy after Bridge failure. Review/testing in progress; not merged or deployed. Memory, database and configuration are outside the change scope.
 
 ## Features — Planned
 
