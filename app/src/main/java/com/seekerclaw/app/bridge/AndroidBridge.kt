@@ -397,7 +397,7 @@ class AndroidBridge(
                 // our AlarmManager one), updates ServiceState, and then
                 // delegates to stopService() which triggers onDestroy →
                 // full cleanup → Process.killProcess at the end.
-                SeekerClawService.stop(context)
+                SeekerClawService.stop(context, userInitiated = false)
             } catch (e: Exception) {
                 Log.e(TAG, "[Bridge] /service/restart failed: ${e.message}", e)
             }

@@ -20,7 +20,7 @@ object Watchdog {
 
     fun start(
         onDead: () -> Unit,
-        isHealthy: () -> Boolean = { NodeBridge.isAlive() },
+        isHealthy: suspend () -> Boolean = { NodeBridge.isAlive() },
     ) {
         stop()
         missedChecks = 0
