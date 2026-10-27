@@ -33,6 +33,6 @@ class BootReceiver : BroadcastReceiver() {
         }
 
         LogCollector.append("[Boot] Auto-starting Claw Engine...")
-        SeekerClawService.start(context)
+        SeekerClawService.start(context, userInitiated = false)
     }
 }

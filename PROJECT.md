@@ -209,7 +209,7 @@ SeekerClaw is an Android app built for the Solana Seeker phone (also works on an
 
 ## Features — In Progress
 
-_None currently._
+- **PR #15 — AndroidBridge health recovery**: authenticated `/ping` verification, three bounded IO recovery attempts (1s/2s/4s), mutex-protected probe/rebind/verify/status and teardown, truthful RUNNING restoration, durable explicit-STOP guard. Follow-up on `fix/osz-bridge-recovery`: watchdog explicitly distinguishes HEALTHY / BRIDGE_UNAVAILABLE / NODE_UNAVAILABLE / STOPPED, rather than reporting live Node as healthy after Bridge failure. Review/testing in progress; not merged or deployed. Memory, database and configuration are outside the change scope.
 
 ## Features — Planned
 
@@ -252,6 +252,7 @@ User (Telegram/Discord) <--HTTPS/WSS--> Channel API <--polling/WS--> Node.js Gat
 
 ## Limitations & Known Issues
 
+- **Fixed loopback ports** — base and Hardened variants share 8765/8766. PR #15 bounds bridge retry on a persistent port conflict rather than creating a process-restart loop; it does not enable simultaneous variants or prove the original phone-side failure cause. Device lifecycle/STOP testing remains necessary before deployment.
 - **Node 18 only** — nodejs-mobile doesn't support Node 22+, so `node:sqlite` is unavailable (using SQL.js WASM instead)
 - **No vector embeddings** — Semantic memory search not possible yet (keyword search only)
 - **OEM battery killers** — Xiaomi MIUI, Samsung OneUI may aggressively kill the background service; Seeker's stock Android avoids this
