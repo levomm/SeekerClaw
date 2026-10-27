@@ -152,6 +152,78 @@ class SeekerClawService : Service() {
     private val scopeJob = SupervisorJob()
     private val scope = CoroutineScope(Dispatchers.IO + scopeJob)
     private var androidBridge: AndroidBridge? = null
+    @Volatile private var currentBridgeToken: String? = null
+    @Volatile private var bridgeRecoveryAttempts = 0
+    @Volatile private var lastBridgeRecoveryAttemptMs = 0L
+    private val maxBridgeRecoveryAttempts = 3
+
+    private fun startAndroidBridge(token: String, reason: String): Boolean {
+        runCatching { androidBridge?.shutdown() }
+        androidBridge = null
+        return try {
+            androidBridge = AndroidBridge(applicationContext, token)
+            androidBridge?.start()
+            currentBridgeToken = token
+            bridgeRecoveryAttempts = 0
+            lastBridgeRecoveryAttemptMs = 0L
+            LogCollector.append("[Service] AndroidBridge started on 127.0.0.1:8765 (auth required, reason=$reason)")
+            true
+        } catch (e: Exception) {
+            androidBridge = null
+            LogCollector.append(
+                "[Service] Failed to start AndroidBridge: ${e.javaClass.simpleName}: ${e.message ?: "no message"}",
+                LogLevel.ERROR,
+            )
+            false
+        }
+    }
+
+    private fun isAndroidBridgeHealthy(): Boolean {
+        val token = currentBridgeToken ?: ServiceState.bridgeToken ?: return false
+        return try {
+            val conn = java.net.URL("http://127.0.0.1:8765/ping").openConnection() as java.net.HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.connectTimeout = 500
+            conn.readTimeout = 500
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty("X-Bridge-Token", token)
+            conn.doOutput = true
+            conn.outputStream.use { it.write("{}".toByteArray(Charsets.UTF_8)) }
+            val ok = conn.responseCode == 200
+            conn.disconnect()
+            ok
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun recoverAndroidBridgeIfNeeded(reason: String): Boolean {
+        if (isAndroidBridgeHealthy()) {
+            bridgeRecoveryAttempts = 0
+            lastBridgeRecoveryAttemptMs = 0L
+            return true
+        }
+        val now = System.currentTimeMillis()
+        val action = decideBridgeHealthAction(
+            nodeAlive = NodeBridge.isAlive(),
+            bridgeHealthy = false,
+            userStopRequested = false,
+            attempts = bridgeRecoveryAttempts,
+            maxAttempts = maxBridgeRecoveryAttempts,
+            nowMs = now,
+            lastAttemptMs = lastBridgeRecoveryAttemptMs,
+            backoffMs = bridgeRecoveryBackoffMs(bridgeRecoveryAttempts),
+        )
+        if (action != BridgeHealthAction.RecoverBridge) return false
+        val token = currentBridgeToken ?: ServiceState.bridgeToken ?: return false
+        bridgeRecoveryAttempts += 1
+        lastBridgeRecoveryAttemptMs = now
+        LogCollector.append(
+            "[Service] AndroidBridge unhealthy — recovery attempt $bridgeRecoveryAttempts/$maxBridgeRecoveryAttempts (reason=$reason)",
+            LogLevel.WARN,
+        )
+        return startAndroidBridge(token, "recovery:$reason")
+    }
 
     /**
      * Read any bytes appended to `node_debug.log` since `nodeDebugLastPos`,
@@ -479,6 +551,14 @@ class SeekerClawService : Service() {
         // uptime is computed against the actual start, not this no-op
         // re-entry.
         if (NodeBridge.isAlive()) {
+            if (!recoverAndroidBridgeIfNeeded("start-reentry")) {
+                LogCollector.append(
+                    "[Service] Start requested while Node.js is running, but AndroidBridge is unavailable; keeping ERROR state",
+                    LogLevel.ERROR,
+                )
+                ServiceState.updateStatus(ServiceStatus.ERROR)
+                return START_STICKY
+            }
             ServiceState.updateStatus(ServiceStatus.RUNNING)
             if (ServiceState.serviceStartTimeMs.value == 0L) {
                 // Defensive: if somehow the start time was cleared
@@ -486,7 +566,7 @@ class SeekerClawService : Service() {
                 // covers a stale-state scenario), set it to now.
                 ServiceState.setServiceStartTimeMs(System.currentTimeMillis())
             }
-            LogCollector.append("[Service] Start requested while already running; re-published RUNNING")
+            LogCollector.append("[Service] Start requested while already running; bridge healthy; re-published RUNNING")
             return START_STICKY
         }
 
@@ -608,16 +688,18 @@ class SeekerClawService : Service() {
         }
 
         // Start Android Bridge (HTTP server for Node.js <-> Kotlin IPC)
-        // Bound to 127.0.0.1 only, requires per-boot auth token
-        try {
-            androidBridge = AndroidBridge(applicationContext, bridgeToken)
-            androidBridge?.start()
-            LogCollector.append("[Service] AndroidBridge started on 127.0.0.1:8765 (auth required)")
-        } catch (e: Exception) {
-            LogCollector.append("[Service] Failed to start AndroidBridge: ${e.javaClass.simpleName}", LogLevel.ERROR)
+        // Bound to 127.0.0.1 only, requires per-boot auth token. This is
+        // required for runtime health: Node can answer AI calls while the
+        // Android IPC channel is dead, so don't hide bridge failure behind
+        // RUNNING.
+        if (!startAndroidBridge(bridgeToken, "initial-start")) {
+            ServiceState.updateStatus(ServiceStatus.ERROR)
+            LogCollector.append("[Service] AndroidBridge unavailable — not marking Claw Engine RUNNING", LogLevel.ERROR)
+            stopSelf()
+            return START_NOT_STICKY
         }
 
-        // Mark as running
+        // Mark as running only after Node.js AND AndroidBridge are available.
         ServiceState.updateStatus(ServiceStatus.RUNNING)
         LogCollector.append("[Service] Claw Engine is now RUNNING")
 
@@ -699,12 +781,15 @@ class SeekerClawService : Service() {
         // we need to kill this :node process and let Android restart it (START_STICKY).
         Watchdog.start(
             onDead = {
-                LogCollector.append("[Service] Watchdog detected Node.js death — killing process for restart", LogLevel.ERROR)
+                LogCollector.append("[Service] Watchdog detected runtime health failure — killing process for restart", LogLevel.ERROR)
                 NodeBridge.stop()
                 // Kill this process so Android restarts the :node service process
                 android.os.Process.killProcess(android.os.Process.myPid())
-            }
-)
+            },
+            isHealthy = {
+                NodeBridge.isAlive() && (isAndroidBridgeHealthy() || recoverAndroidBridgeIfNeeded("watchdog"))
+            },
+        )
 
         // Watch Node.js debug log and forward new lines to LogCollector.
         //
