@@ -210,6 +210,10 @@ test('delta self-awareness survives Hardened prompt compaction and documents new
     const diagnostics = fs.readFileSync(path.join(bundle, 'DIAGNOSTICS.md'), 'utf8');
     for (const term of ['delivery unconfirmed', 'Response saved', 'Failed to publish', 'Live settings unavailable', '429/5xx']) assert(diagnostics.includes(term), term);
     assert(!prompt.includes('exactly-once guarantee'));
+    const ai = fs.readFileSync(path.join(bundle, 'ai.js'), 'utf8');
+    const memory = fs.readFileSync(path.join(bundle, 'tools/memory.js'), 'utf8');
+    assert(!ai.includes('pick it up immediately')); assert(!memory.includes('pick them up immediately'));
+    assert(ai.includes('Do not promise immediate adoption by every tool'));
 });
 
 test('HTTP response abort rejects rather than hanging forever', async () => {

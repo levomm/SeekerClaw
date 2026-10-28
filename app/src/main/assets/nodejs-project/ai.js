@@ -1124,7 +1124,7 @@ function buildSystemBlocks(matchedSkills = [], chatId = null, activeModel = MODE
     lines.push('1. Save it to agent_settings.json under apiKeys.<service> (e.g. apiKeys.perplexity)');
     lines.push('   IMPORTANT: NEVER save the key to memory files (MEMORY.md, daily notes). Keys go ONLY in agent_settings.json.');
     lines.push('2. Confirm it\'s saved');
-    lines.push('3. Built-in tools (web_search, Jupiter, etc.) pick it up immediately — just use them normally');
+    lines.push('3. web_search refreshes conversational search keys before each call. Other integrations may require a controlled restart; Android-managed keys keep precedence and need a restart after Settings edits. Do not promise immediate adoption by every tool.');
     lines.push('4. Warn the user:');
     lines.push('   "⚠️ This key appeared in your chat history. For better security:');
     lines.push('   - Rotate/regenerate this key after use');
