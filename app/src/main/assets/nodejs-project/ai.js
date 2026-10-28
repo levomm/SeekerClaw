@@ -19,8 +19,10 @@ const {
     getOwnerId,
     USER_ENV_KEYS,
     config: _config,
+    runtimeSettings: liveRuntimeSettings,
     runtimeState: _runtimeState,
 } = require('./config');
+const runtimeSettings = liveRuntimeSettings || require('./runtime-settings').createRuntimeSettings(workDir, _config || {}, log);
 const { reasoningSupportFor, displayNameForProvider } = require('./model-catalog');
 const { logSuppression: _logSuppression, SUPPRESSION_REASONS: _SUPPRESSION_REASONS } = require('./reasoning-gating');
 
@@ -964,7 +966,7 @@ function buildSystemBlocks(matchedSkills = [], chatId = null, activeModel = MODE
     }
 
     // Channel formatting — headers aren't rendered in Telegram, guide the agent
-    if (CHANNEL === 'telegram' && RICH_MESSAGES_ENABLED) {
+    if (CHANNEL === 'telegram' && runtimeSettings.read().richMessages) {
         // BAT-1050 P1A: Rich Messages ON — Telegram's server renders full Markdown.
         lines.push('**Telegram Formatting (for user-visible Telegram replies)**');
         lines.push('- Rich Messages are ON: Telegram renders standard Markdown, so you MAY use ## headings, tables, task lists (- [ ] / - [x]), > blockquotes, ==marked==, ||spoiler||, math ($x^2$ and $$E=mc^2$$), and fenced code blocks WITH a language tag (```python).');
@@ -1128,7 +1130,8 @@ function buildSystemBlocks(matchedSkills = [], chatId = null, activeModel = MODE
     lines.push('   - Rotate/regenerate this key after use');
     lines.push('   - Use Android Settings to store keys securely (they won\'t appear in chat history)"');
     lines.push('');
-    lines.push('Note: Keys in agent_settings.json persist across restarts. After saving a key, built-in tools (web_search, Jupiter, etc.) pick it up immediately — no restart needed.');
+    lines.push('Search keys in agent_settings.json are refreshed before each web_search. Android Settings keys take precedence and changing those keys requires a controlled service restart. Never print keys to diagnose configuration.');
+    lines.push('Telegram interactive final answers are saved to an app-private delivery outbox before task cleanup. A timeout is NOT confirmed delivery: no blind resend. Users can list pending answers with /outbox and explicitly recover text with /outbox show <id>; the original uncertain message may already be visible. STOP pauses sending. Rich rendering, maxStepsPerTurn and heartbeat interval are read live from agent_settings.json; failed reads retain last valid values.');
     lines.push('If asked about config issues, check agent_settings.json and PLATFORM.md.');
     lines.push('**Quick model/provider switch from chat (BAT-504):** Users can run `/model <name>` and `/provider <claude|openai|openrouter|custom|xai>` directly in Telegram instead of opening Settings → AI Provider. Both write to runtime_state.json (live overlay) and survive restart. If the user asks how to switch model or provider, point them at these commands first.');
     lines.push('**Your model can change mid-conversation (BAT-1083):** The active model is re-resolved every turn, so a switch in Settings or via `/model` takes effect on your very next reply — your "Model:" line above always reflects the CURRENT model. You cannot see your own PAST model values across a conversation. If a user asks why an earlier reply named a different model, say it was most likely switched between turns — do NOT guess or claim you "misread" it.');
@@ -2913,22 +2916,11 @@ async function chat(chatId, userMessage, options = {}) {
     // scope, so capture the final response's blocks here so the
     // addToConversation(final) at end-of-turn can persist them.
     let lastParsedReasoningBlocks = [];
-    // Read maxStepsPerTurn from agent_settings.json each turn so the user's
-    // Settings change takes effect on the next chat() call (no service restart).
-    // Mirrors getHeartbeatIntervalMs() in main.js. Clamped to [10, 100]; invalid
-    // or missing values fall back to config.maxStepsPerTurn, then 35.
-    const configuredMaxSteps = (() => {
-        try {
-            const settingsPath = path.join(workDir, 'agent_settings.json');
-            if (fs.existsSync(settingsPath)) {
-                const s = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-                const n = parseInt(s.maxStepsPerTurn, 10);
-                if (n >= 10 && n <= 100) return n;
-            }
-        } catch (_) {}
-        const fallback = parseInt(_config && _config.maxStepsPerTurn, 10);
-        return (fallback >= 10 && fallback <= 100) ? fallback : 35;
-    })();
+    // Snapshot the shared live settings at turn start. Read failures retain the
+    // last valid budget instead of silently raising a saved 12 to a cold 35.
+    // Changes apply to the next turn, never midway through the tool loop.
+    const configuredMaxSteps = runtimeSettings.read().maxStepsPerTurn;
+    log(`[RuntimeSettings] turn=${turnId} maxSteps=${configuredMaxSteps}`, 'DEBUG');
     const requestedBackgroundSteps = parseInt(options.backgroundMaxSteps, 10);
     const backgroundToolSteps = Number.isFinite(requestedBackgroundSteps)
         ? Math.max(1, Math.min(requestedBackgroundSteps, 6))
@@ -3812,6 +3804,7 @@ async function chat(chatId, userMessage, options = {}) {
             // also covers every downstream exit path (budget / silent / normal /
             // exception), which a post-final-text hook would miss.
             if (securityRejectPending) {
+                await options.persistFinal?.(buildSecurityRejectBlock(securityRejectPending.rejectCode, securityRejectPending.rejectReason));
                 return _finalizeSecurityReject(chatId, taskId, turnId, securityRejectPending, _turnAnchor); // BAT-1186 (A9)
             }
 
@@ -3925,6 +3918,7 @@ async function chat(chatId, userMessage, options = {}) {
                 }
             }
 
+            await options.persistFinal?.(fallback);
             return fallback;
         }
 
@@ -3985,6 +3979,7 @@ async function chat(chatId, userMessage, options = {}) {
                     }
                 }
                 const fallback = `Done — took ${stepCount} step${stepCount !== 1 ? 's' : ''} (${toolNames.join(', ') || 'various'}).`;
+                await options.persistFinal?.(fallback);
                 clearActiveTask(chatId);
                 cleanupChatCheckpoints(chatId);
                 addToConversation(chatId, 'assistant', fallback, null, _turnAnchor); // BAT-1186 (A9)
@@ -4005,6 +4000,8 @@ async function chat(chatId, userMessage, options = {}) {
         }
         const assistantMessage = textContent.text;
 
+        // Do not delete resumable work until the final answer is durably accepted.
+        await options.persistFinal?.(assistantMessage);
         // P2.4: Task completed successfully — clear active task
         clearActiveTask(chatId);
         // P2.2: Only clean up checkpoints if tools were used (task actually progressed).

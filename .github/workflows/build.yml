@@ -73,6 +73,7 @@ jobs:
             confirmation-buttons-guard \
             bridge-token-validation \
             bridge-health-regression \
+            osz-delivery-runtime \
             system-prompt-wallets \
             system-prompt-recent-sessions \
             recent-sessions-heartbeat-filter \

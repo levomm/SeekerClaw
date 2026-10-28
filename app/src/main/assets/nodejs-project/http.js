@@ -14,22 +14,37 @@ const { API_TIMEOUT_MS } = require('./config');
 function httpRequest(options, body = null) {
     const timeoutMs = options.timeout ?? API_TIMEOUT_MS;
     return new Promise((resolve, reject) => {
-        const req = getClient(options).request(options, (res) => {
-            res.setEncoding('utf8'); // Handle multi-byte chars (emoji) split across chunks
-            let data = '';
-            res.on('data', chunk => data += chunk);
-            res.on('end', () => {
-                try {
-                    resolve({ status: res.statusCode, data: JSON.parse(data), headers: res.headers });
-                } catch (e) {
-                    resolve({ status: res.statusCode, data: data, headers: res.headers });
-                }
+        let timer = null, settled = false, req;
+        const finish = (error, value) => {
+            if (settled) return;
+            settled = true;
+            if (timer) clearTimeout(timer);
+            error ? reject(error) : resolve(value);
+        };
+        const timeout = () => {
+            const error = new Error('Timeout'); error.timeoutSource = 'transport';
+            finish(error); req?.destroy();
+        };
+        try {
+            req = getClient(options).request(options, (res) => {
+                res.setEncoding('utf8');
+                let data = '';
+                res.on('data', chunk => data += chunk);
+                res.on('error', error => finish(error));
+                res.on('aborted', () => finish(new Error('Response aborted before acknowledgement')));
+                res.on('end', () => {
+                    let parsed = data;
+                    try { parsed = JSON.parse(data); } catch (_) {}
+                    finish(null, { status: res.statusCode, data: parsed, headers: res.headers });
+                });
             });
-        });
-        req.on('error', reject);
-        req.setTimeout(timeoutMs, () => { req.destroy(); const err = new Error('Timeout'); err.timeoutSource = 'transport'; reject(err); });
-        if (body) req.write(typeof body === 'string' ? body : JSON.stringify(body));
-        req.end();
+            req.on('error', error => finish(error));
+            req.setTimeout(timeoutMs, timeout);
+            // Also bound DNS/connect stalls; socket inactivity timeout alone is insufficient.
+            if (!settled) timer = setTimeout(timeout, timeoutMs);
+            if (body) req.write(typeof body === 'string' ? body : JSON.stringify(body));
+            req.end();
+        } catch (error) { finish(error); req?.destroy(); }
     });
 }
 

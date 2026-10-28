@@ -13,7 +13,7 @@ const serviceDir = path.join(root, 'app/src/main/java/com/seekerclaw/app/service
 function load(name, deps) {
     const module = { exports: {} };
     vm.runInNewContext(fs.readFileSync(path.join(bundle, name), 'utf8'), {
-        module, exports: module.exports, Buffer,
+        module, exports: module.exports, Buffer, setTimeout, clearTimeout,
         require(id) {
             if (Object.prototype.hasOwnProperty.call(deps, id)) return deps[id];
             throw new Error(`Unexpected dependency: ${id}`);

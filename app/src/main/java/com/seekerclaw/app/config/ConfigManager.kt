@@ -991,7 +991,7 @@ object ConfigManager {
         // configOverride=config: skip the loadConfig round-trip
         // writeAgentSettingsJson would otherwise do, which would
         // re-trigger reconcile (PR #339 device-test regression fix).
-        writeAgentSettingsJson(context, configOverride = config)
+        if (!writeAgentSettingsJson(context, configOverride = config)) return false
         // Notify the OTHER process — main-process UI relies on this
         // to refresh after :node-process writes (e.g. /provider
         // Telegram switch's service-start reconcile). Same-process
@@ -2314,37 +2314,38 @@ object ConfigManager {
      *   Settings UI save. Service-start callers omit this param to get
      *   the default reconcile-then-publish behavior.
      */
-    fun writeAgentSettingsJson(context: Context, configOverride: AppConfig? = null) {
-        val config = configOverride ?: loadConfig(context)
-        if (config == null) {
-            LogCollector.append("[Config] writeAgentSettingsJson: loadConfig returned null; skipping write", LogLevel.WARN)
-            return
-        }
+    fun writeAgentSettingsJson(context: Context, configOverride: AppConfig? = null): Boolean {
+        val config = configOverride ?: loadConfig(context) ?: return false
         val workspaceDir = File(context.filesDir, "workspace").apply { mkdirs() }
         val settingsFile = File(workspaceDir, "agent_settings.json")
-        try {
-            // Read existing file to preserve agent-written fields (e.g. apiKeys)
-            val existing = if (settingsFile.exists()) {
-                try { JSONObject(settingsFile.readText()) } catch (_: Exception) { JSONObject() }
-            } else {
-                JSONObject()
+        return try {
+            java.io.RandomAccessFile(File(workspaceDir, "agent_settings.lock"), "rw").use { lockFile ->
+                lockFile.channel.lock().use {
+                    val atomic = android.util.AtomicFile(settingsFile)
+                    // Never replace unreadable existing data with an empty object (could lose apiKeys).
+                    val existing = if (settingsFile.exists()) JSONObject(String(atomic.readFully(), Charsets.UTF_8)) else JSONObject()
+                    existing.put("heartbeatIntervalMinutes", config.heartbeatIntervalMinutes)
+                    existing.put("maxStepsPerTurn", config.maxStepsPerTurn)
+                    existing.put("richMessages", config.richMessages)
+                    existing.put("provider", config.provider)
+                    existing.put("authType", config.authType)
+                    existing.put("model", config.model)
+                    if (!existing.has("apiKeys")) existing.put("apiKeys", JSONObject())
+                    var stream: java.io.FileOutputStream? = null
+                    try {
+                        stream = atomic.startWrite()
+                        stream.write(existing.toString(2).toByteArray(Charsets.UTF_8))
+                        atomic.finishWrite(stream)
+                    } catch (e: Exception) {
+                        atomic.failWrite(stream)
+                        throw e
+                    }
+                }
             }
-            // Android-managed fields always overwrite. The provider/authType/model
-            // triple is included so Node-initiated changes (via /model or /provider
-            // Telegram commands) have a single consistent source of truth, and a
-            // Settings UI save here publishes the canonical values.
-            existing.put("heartbeatIntervalMinutes", config.heartbeatIntervalMinutes)
-            existing.put("maxStepsPerTurn", config.maxStepsPerTurn)
-            existing.put("provider", config.provider)
-            existing.put("authType", config.authType)
-            existing.put("model", config.model)
-            // Ensure apiKeys object exists (agent writes individual keys into it)
-            if (!existing.has("apiKeys")) {
-                existing.put("apiKeys", JSONObject())
-            }
-            settingsFile.writeText(existing.toString(2))
-        } catch (e: Exception) {
-            LogCollector.append("[Config] Failed to write agent_settings.json: ${e.message}", LogLevel.WARN)
+            true
+        } catch (_: Exception) {
+            LogCollector.append("[Config] Failed to publish agent_settings.json; previous file preserved", LogLevel.WARN)
+            false
         }
     }
 

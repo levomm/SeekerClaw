@@ -26,7 +26,10 @@ class LeaseRenewalTest {
 
     @Before
     fun setUp() {
-        server = ServerSocket(8766, 16, InetAddress.getByName("127.0.0.1"))
+        server = ServerSocket().apply {
+            reuseAddress = true
+            bind(java.net.InetSocketAddress(InetAddress.getByName("127.0.0.1"), 8766), 16)
+        }
         acceptThread = Thread {
             try {
                 while (!server.isClosed) {
@@ -55,6 +58,7 @@ class LeaseRenewalTest {
         SeekerClawService.setLeaseRenewMsForTest(5_000L)
         ServiceState.setBridgeTokenForTest(null)
         runCatching { server.close() }
+        if (::acceptThread.isInitialized) acceptThread.join(1000)
     }
 
     @Test

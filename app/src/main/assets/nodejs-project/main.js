@@ -249,7 +249,9 @@ if (CHANNEL === 'telegram') {
 }
 
 // Convenience aliases — route through channel.js for channel-agnostic callers
-const sendMessage = (chatId, text, replyTo, buttons) => channel.sendMessage(chatId, text, replyTo);
+const sendMessage = (chatId, text, replyTo, buttons, opts) => channel.sendMessage(chatId, text, replyTo, buttons, opts);
+const prepareMessage = (...args) => channel.prepareMessage(...args);
+const outboxCommand = (...args) => channel.outboxCommand(...args);
 // BAT-1050 P1A: plain/system send for synthetic notices (heartbeat, back-online,
 // confirmation nudges, auto-resume status) — never renders Rich. User-content
 // replies (and cron reminders) keep using sendMessage above.
@@ -821,7 +823,7 @@ telegram('getMe')
                 config,
                 redactSecrets,
                 telegram,
-                sendMessage, sendTyping, downloadTelegramFile, downloadFileByUrl,
+                sendMessage, prepareMessage, outboxCommand, sendTyping, downloadTelegramFile, downloadFileByUrl,
                 extractMedia,
                 createStatusReactionController,
                 MAX_FILE_SIZE, MAX_IMAGE_SIZE,
@@ -977,7 +979,7 @@ telegram('getMe')
             config,
             redactSecrets,
             telegram,
-            sendMessage, sendTyping, downloadTelegramFile, downloadFileByUrl,
+            sendMessage, prepareMessage, outboxCommand, sendTyping, downloadTelegramFile, downloadFileByUrl,
             extractMedia,
             createStatusReactionController,
             MAX_FILE_SIZE, MAX_IMAGE_SIZE,
@@ -1093,15 +1095,7 @@ setInterval(() => {
 const path = require('path');
 
 function getHeartbeatIntervalMs() {
-    try {
-        const settingsPath = path.join(workDir, 'agent_settings.json');
-        if (fs.existsSync(settingsPath)) {
-            const s = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-            const min = parseInt(s.heartbeatIntervalMinutes, 10);
-            if (min >= 5 && min <= 120) return min * 60 * 1000;
-        }
-    } catch (_) {}
-    return (config.heartbeatIntervalMinutes || 30) * 60 * 1000;
+    return require('./config').runtimeSettings.read().heartbeatIntervalMinutes * 60 * 1000;
 }
 
 // ============================================================================

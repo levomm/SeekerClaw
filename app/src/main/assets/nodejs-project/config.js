@@ -672,6 +672,9 @@ const API_TIMEOUT_MAX_BACKOFF_MS = Math.max(1000, _safeInt(config.apiTimeoutMaxB
 // default-ON is safe even where the Bot API method is unavailable.
 const _boolFlag = (v) => v === true || v === 'true' || v === '1';
 const RICH_MESSAGES_ENABLED = _boolFlag(config.richMessages ?? process.env.SEEKERCLAW_RICH ?? true);
+const runtimeSettings = require('./runtime-settings').createRuntimeSettings(
+    workDir, { ...config, richMessages: RICH_MESSAGES_ENABLED }, log);
+runtimeSettings.read();
 // Bot API feature level this build targets (Rich Messages = Bot API 10.1).
 // Tracked so diagnostics / the tg-bot-api-parity check can report what we
 // build against; not a wire-protocol version (we call api.telegram.org raw).
@@ -1156,6 +1159,7 @@ module.exports = {
 
     // BAT-1050: Telegram Rich Messages (Bot API 10.1) — DEFAULT-ON flag (config.richMessages > SEEKERCLAW_RICH > true)
     RICH_MESSAGES_ENABLED,
+    runtimeSettings,
     BOT_API_VERSION,
 
     // Conversational API keys (BAT-236)

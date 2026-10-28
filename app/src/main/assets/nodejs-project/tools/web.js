@@ -1,7 +1,7 @@
 // tools/web.js — web_search, web_fetch handlers
 
 const {
-    log, config, getSearchProvider,
+    log, config, getSearchProvider, syncAgentApiKeys,
 } = require('../config');
 
 const {
@@ -18,7 +18,7 @@ const {
 const tools = [
     {
         name: 'web_search',
-        description: 'Search the web for current information. Uses the search provider configured in Settings. Override with the provider parameter if needed.',
+        description: 'Search the web for current information using the live Settings provider (or an explicit provider override). Conversational search API keys are refreshed before each call; changing Android-managed keys requires a controlled service restart. Results are cached separately per provider.',
         input_schema: {
             type: 'object',
             properties: {
@@ -53,6 +53,7 @@ const tools = [
 
 const handlers = {
     async web_search(input, chatId) {
+        syncAgentApiKeys?.(); // Pick up conversational Tavily/search keys before resolving the request.
         // Resolve provider: explicit override or live configured default.
         // BAT-515: getSearchProvider() reads agent_preferences.json per-call
         // (precedence: live → config.json cold-start → 'brave'), so a

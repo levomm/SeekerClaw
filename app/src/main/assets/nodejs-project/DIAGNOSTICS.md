@@ -14,6 +14,48 @@ The agent runs on one of two channels, configured by the `CHANNEL` setting (`tel
 
 ## Telegram
 
+### Saved responses, timeouts and `/outbox`
+
+Interactive final replies are saved in the app-private `delivery-outbox/` directory
+(outside workspace memory) before completed-task cleanup and before the first send.
+`[Delivery] Response saved; awaiting explicit /outbox recovery` and transport-error
+`delivery unconfirmed` / `possibly delivered; no classic fallback` messages mean
+**not acknowledged**, not success. The handler must not mark the reply done or
+increment delivered-message stats. `/outbox` lists this chat's pending records;
+`/outbox show <id>` explicitly retrieves saved text without re-running tools. The
+uncertain original may already be visible. There is no automatic replay of an
+ambiguous POST, a partially delivered answer, or a persisted ATTEMPTING record after
+a crash. Known acknowledged chunks are never implicitly resent. 429/5xx do not
+immediately fall through from Rich to another visible send. STOP/quiescence pauses
+new tracked sends. Outbox persistence failure prevents the first tracked POST;
+preserve pending files for recovery, never wipe them or memory to fix delivery.
+This is not an exactly-once guarantee and not an automatic retry queue. System
+notices, uploads and non-interactive sends without a delivery key are outside this
+interactive outbox contract. Missing acknowledgements / aborted responses are
+uncertain; HTTP timeout includes DNS/connect time. Do not infer broken IPv6 from
+ETIMEDOUT: inspect the transport phase; a separate HTTP/2 check is not the same POST.
+
+### Live step budget, heartbeat, Rich and Tavily
+
+`[RuntimeSettings] Live settings unavailable or invalid; retaining last valid values`
+means an overlay read/validation failed; the last valid 12-step selection is NOT
+replaced by a startup 35. The per-turn `[RuntimeSettings] turn=... maxSteps=...` line
+shows the actual budget captured at turn start. A change during a turn applies to
+the next turn. `[Config] Failed to publish agent_settings.json; previous file preserved`
+means Android publication failed; Settings shows an error rather than silently
+claiming successful publication. Existing unknown fields / API keys are preserved;
+do not replace a malformed file with an empty object. Publishing uses AtomicFile.
+
+Heartbeat minutes (5..120) are read at each one-minute scheduler check: 60 means
+60 minutes, not 60 seconds. Silent/skipped probes need not produce a user message.
+Rich toggles are read live without a restart. Turning Rich off can isolate a
+format/method problem but does not solve ambiguous transport delivery by itself.
+Tavily provider selection is live from agent_preferences.json; explicit tool
+provider arguments override it. Conversational search keys are synchronized before
+each web_search, but Android-managed keys keep precedence and require a controlled
+restart after editing. Check provider and key-presence booleans only; never print
+secrets. Provider-specific cache keys prevent reuse of another provider's results.
+
 ### Bot Token Invalid/Revoked
 **Symptoms:** No messages received, grammy throws 401 Unauthorized in logs.
 **Check:**

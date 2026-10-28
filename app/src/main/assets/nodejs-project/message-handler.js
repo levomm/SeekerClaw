@@ -88,13 +88,17 @@ async function deliverAgentText(chatId, rawText, messageId, replyToDefault, dedu
         return false;
     }
 
-    await deps.sendMessage(
-        chatId,
-        text,
-        replyTo,
-        null,
-        messageThreadId != null ? { messageThreadId } : {},
+    const result = await deps.sendMessage(
+        chatId, text, replyTo, null,
+        { deliveryKey: `${messageId}:${replyToDefault == null ? 'interim' : 'final'}`,
+            ...(messageThreadId != null ? { messageThreadId } : {}) },
     );
+    if (result?.status && result.status !== 'acknowledged') {
+        // Suppress repeat attempts of this uncertain interim, but never report success.
+        if (dedupSet) dedupSet.add(text);
+        const error = new Error('Response saved; delivery not confirmed. Use /outbox to recover.');
+        error.code = 'DELIVERY_PENDING'; error.deliveryId = result.deliveryId; throw error;
+    }
     if (dedupSet) dedupSet.add(text);
     return true;
 }
@@ -144,6 +148,10 @@ Send me anything to get started!`;
             const skillCount = deps.loadSkills().length;
             const body = buildHelpLines().join('\n');
             return `**Commands**\n\n${body}\n\n*${skillCount} skill${skillCount !== 1 ? 's' : ''} installed · /help to see this again*`;
+        }
+
+        case '/outbox': {
+            return deps.outboxCommand ? deps.outboxCommand(chatId, args) : 'Saved-response recovery is available on Telegram.';
         }
 
         case '/quick': {
@@ -1331,7 +1339,14 @@ async function handleMessage(normalized) {
             }
         };
 
-        let response = await deps.chat(chatId, userContent, { isResume, originalGoal: resumeGoal, statusReaction, resumedFromTaskId, sendInterim });
+        const persistFinal = async (rawText) => {
+            if (!deps.prepareMessage || typeof rawText !== 'string') return;
+            let text = stripSilentReply(rawText.trim().replace(/(?:^|\s+|\*+)HEARTBEAT_OK\s*$/gi, '').replace(/\bHEARTBEAT_OK\b/gi, ''));
+            if (text.startsWith('[[reply_to_current]]')) text = text.replace('[[reply_to_current]]', '').trim();
+            if (text) await deps.prepareMessage(chatId, text, messageId, null,
+                { deliveryKey: `${messageId}:final`, ...(messageThreadId != null ? { messageThreadId } : {}) });
+        };
+        let response = await deps.chat(chatId, userContent, { isResume, originalGoal: resumeGoal, statusReaction, resumedFromTaskId, sendInterim, persistFinal });
 
         // chat() is contracted to return a STRING (assistant text, a budget/fallback
         // string, or the SILENT_REPLY sentinel). A non-string here is a programming
@@ -1362,6 +1377,10 @@ async function handleMessage(normalized) {
     } catch (error) {
         deps.log(`Error: ${error.message}`, 'ERROR');
         await statusReaction.setError();
+        if (error.code === 'DELIVERY_PENDING') {
+            deps.log('[Delivery] Response saved; awaiting explicit /outbox recovery', 'WARN');
+            return; // Never create a second visible error message after an ambiguous POST.
+        }
         await deps.sendMessage(
             chatId,
             `Error: ${deps.redactSecrets(error.message)}`,
