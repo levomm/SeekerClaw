@@ -254,17 +254,48 @@ registerAgentSettingsSecrets();
 // PATH VALIDATION
 // ============================================================================
 
-// Validate that a resolved file path is within workspace (prevents path traversal)
+function _workspaceRoot() {
+    let root = path.resolve(workDir);
+    try { root = fs.realpathSync(root); } catch (_) {}
+    return root;
+}
+
+function _isInside(root, candidate) {
+    const r = path.resolve(root);
+    const c = path.resolve(candidate);
+    return c === r || c.startsWith(r + path.sep);
+}
+
+// Validate that a resolved file path is within workspace (prevents path traversal).
+// For paths that already exist (or whose nearest existing parent is a symlink),
+// also validate the realpath so workspace symlinks cannot expose app-private
+// sibling stores such as ../delivery-outbox.
 function safePath(userPath) {
-    // Resolve to absolute, then check it starts with workDir
+    const lexicalRoot = path.resolve(workDir);
+    const realRoot = _workspaceRoot();
     const resolved = path.resolve(workDir, userPath);
-    // Normalize both to handle trailing separators
-    const normalizedWork = path.resolve(workDir) + path.sep;
-    const normalizedResolved = path.resolve(resolved);
-    if (normalizedResolved !== path.resolve(workDir) && !normalizedResolved.startsWith(normalizedWork)) {
-        return null; // Path escapes workspace
+    if (!_isInside(lexicalRoot, resolved)) return null;
+
+    let existing = resolved;
+    while (!fs.existsSync(existing)) {
+        const parent = path.dirname(existing);
+        if (parent === existing) return null;
+        existing = parent;
     }
-    return normalizedResolved;
+    let realExisting;
+    try { realExisting = fs.realpathSync(existing); } catch (_) { return null; }
+    if (!_isInside(realRoot, realExisting)) return null;
+
+    // If the target itself exists, require the final realpath to stay in the
+    // workspace. If only a parent exists, the parent check above is enough for
+    // creating a new child below it.
+    if (existing === resolved) return realExisting;
+    return resolved;
+}
+
+function isWorkspacePath(candidatePath) {
+    const resolved = path.isAbsolute(candidatePath) ? path.resolve(candidatePath) : path.resolve(workDir, candidatePath);
+    return safePath(path.relative(workDir, resolved)) !== null;
 }
 
 // ============================================================================
@@ -392,6 +423,7 @@ module.exports = {
     maskAgentSettings,
     registerAgentSettingsSecrets,
     safePath,
+    isWorkspacePath,
     INJECTION_PATTERNS,
     normalizeWhitespace,
     detectSuspiciousPatterns,

@@ -24,6 +24,26 @@ a preservation warning. A dedicated real-sender/outbox regression creates two
 chat-scoped pending replies and malformed JSON, checks the usable listing and
 warning, preserves the exact corrupt file, and proves no pending POST is replayed.
 
+## Fresh security review 5677386943 — additional P2 (4396561262)
+
+Saved outbox plaintext lives in the app-private `../delivery-outbox` sibling, so
+the model-facing tool boundary now uses path confinement, not basename-only
+redaction. `safePath()` validates both lexical paths and realpaths/nearest
+existing parents so workspace symlinks cannot escape to sibling stores. `js_eval`
+`fs`/`fs.promises` guards cover read, enumerate, stat, write, rename/link/copy and
+other path-taking operations, rewriting accepted relative paths under the
+workspace and rejecting everything outside it. `shell_exec` tokenizes the simple
+allowlisted command shape and rejects path-like arguments that resolve outside the
+workspace, including `../delivery-outbox`, absolute outside paths and `file://`
+local-file URLs. The `agent-settings-mask` regression now seeds a sibling outbox
+record and proves shell path traversal/local-file URL access, direct JS reads, JS
+enumeration, and workspace-symlink reads do not expose the sentinel plaintext.
+The same regression suite also proves legitimate workspace files remain readable
+through `read`, `shell_exec` and `js_eval`, while absolute outside paths are
+blocked through all three surfaces. The outbox runtime suite has an explicit
+`path confinement does not break explicit /outbox recovery` case so the secure
+boundary does not remove user-triggered recovery.
+
 The added automated cases are offline/JVM checks, not Android UI instrumentation,
 real Telegram/Tavily calls, a full live-model SAB or phone E2E. Exact commit, CI
 results and fresh review receipt are recorded in PR #17 after execution. Original

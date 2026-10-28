@@ -50,6 +50,14 @@ const ORIGINAL_SETTINGS = {
     provider: 'claude',
 };
 fs.writeFileSync(path.join(workDir, 'agent_settings.json'), JSON.stringify(ORIGINAL_SETTINGS), 'utf8');
+const filesDir = path.dirname(workDir);
+const outboxDir = path.join(filesDir, 'delivery-outbox', 'botns');
+fs.mkdirSync(outboxDir, { recursive: true });
+fs.writeFileSync(path.join(outboxDir, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json'), JSON.stringify({ text: 'SENTINEL_OUTBOX_PLAINTEXT' }), 'utf8');
+fs.writeFileSync(path.join(workDir, 'public.txt'), 'WORKSPACE_PUBLIC_OK', 'utf8');
+const outsideFile = path.join(filesDir, 'outside-private.txt');
+fs.writeFileSync(outsideFile, 'SENTINEL_OUTSIDE_PRIVATE', 'utf8');
+try { fs.symlinkSync(path.join(filesDir, 'delivery-outbox'), path.join(workDir, 'outbox-link'), 'dir'); } catch (_) {}
 process.argv[2] = workDir;
 process.on('exit', () => { try { fs.rmSync(workDir, { recursive: true, force: true }); } catch (_) {} });
 
@@ -193,6 +201,58 @@ check('stored values >= min length (incl. merge-losers + nested) are registered 
             const sh = await sysTool.handlers.shell_exec({ command }, 'chat');
             assert.ok(!(sh.error && /blocked/i.test(sh.error)), `must not be blocked: ${command}`);
         }
+    });
+
+    await checkAsync('workspace file access remains allowed through read, shell_exec and js_eval', async () => {
+        const viaRead = await fileTool.handlers.read({ path: 'public.txt' }, 'chat');
+        assert.equal(viaRead.content, 'WORKSPACE_PUBLIC_OK', 'read tool can read workspace file');
+
+        for (const command of ['cat public.txt', `cat ${path.join(workDir, 'public.txt')}`]) {
+            const sh = await sysTool.handlers.shell_exec({ command }, 'chat');
+            assert.equal(sh.success, true, `shell command should succeed: ${command}`);
+            assert.equal(sh.stdout, 'WORKSPACE_PUBLIC_OK');
+        }
+
+        const jsRel = await sysTool.handlers.js_eval({ code: "const fs=require('fs'); return fs.readFileSync('public.txt','utf8');" }, 'chat');
+        assert.equal(jsRel.success, true, 'js_eval relative workspace read succeeds');
+        assert.equal(jsRel.result, 'WORKSPACE_PUBLIC_OK');
+        const jsAbs = await sysTool.handlers.js_eval({ code: `const fs=require('fs'); return fs.readFileSync(${JSON.stringify(path.join(workDir, 'public.txt'))},'utf8');` }, 'chat');
+        assert.equal(jsAbs.success, true, 'js_eval absolute in-workspace read succeeds');
+        assert.equal(jsAbs.result, 'WORKSPACE_PUBLIC_OK');
+    });
+
+    await checkAsync('absolute outside paths are blocked through read, shell_exec and js_eval', async () => {
+        const viaRead = await fileTool.handlers.read({ path: outsideFile }, 'chat');
+        assert.ok(viaRead.error && /outside workspace|Access denied/i.test(viaRead.error), 'read absolute outside path blocked');
+
+        const sh = await sysTool.handlers.shell_exec({ command: `cat ${outsideFile}` }, 'chat');
+        assert.ok(sh.error && /outside workspace/i.test(sh.error), 'shell absolute outside path blocked');
+        assert.ok(!JSON.stringify(sh).includes('SENTINEL_OUTSIDE_PRIVATE'), 'shell did not leak outside plaintext');
+
+        const js = await sysTool.handlers.js_eval({ code: `const fs=require('fs'); return fs.readFileSync(${JSON.stringify(outsideFile)},'utf8');` }, 'chat');
+        assert.ok(!js.success && /outside workspace|blocked/i.test(js.error || ''), 'js_eval absolute outside path blocked');
+        assert.ok(!JSON.stringify(js).includes('SENTINEL_OUTSIDE_PRIVATE'), 'js_eval did not leak outside plaintext');
+    });
+
+    await checkAsync('delivery-outbox sibling is blocked from shell_exec path traversal', async () => {
+        for (const command of ['ls ../delivery-outbox', 'cat ../delivery-outbox/botns/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json', `curl file://${path.join(outboxDir, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json')}`]) {
+            const sh = await sysTool.handlers.shell_exec({ command }, 'chat');
+            assert.ok(sh.error && /outside workspace/i.test(sh.error), `must block: ${command}`);
+            assert.ok(!JSON.stringify(sh).includes('SENTINEL_OUTBOX_PLAINTEXT'), 'no outbox plaintext reaches model');
+        }
+    });
+
+    await checkAsync('delivery-outbox sibling is blocked from js_eval fs and workspace symlink reads', async () => {
+        const direct = await sysTool.handlers.js_eval({ code: "const fs=require('fs'); return fs.readFileSync('../delivery-outbox/botns/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json','utf8');" }, 'chat');
+        assert.ok(!direct.success && /outside workspace|blocked/i.test(direct.error || ''), 'direct ../ read blocked');
+        assert.ok(!JSON.stringify(direct).includes('SENTINEL_OUTBOX_PLAINTEXT'), 'direct read did not leak plaintext');
+
+        const enumAttempt = await sysTool.handlers.js_eval({ code: "const fs=require('fs'); return fs.readdirSync('../delivery-outbox');" }, 'chat');
+        assert.ok(!enumAttempt.success && /outside workspace|blocked/i.test(enumAttempt.error || ''), 'direct ../ enumeration blocked');
+
+        const viaLink = await fileTool.handlers.read({ path: 'outbox-link/botns/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json' }, 'chat');
+        assert.ok(viaLink.error && /outside workspace|Access denied/i.test(viaLink.error), 'read tool symlink escape blocked');
+        assert.ok(!JSON.stringify(viaLink).includes('SENTINEL_OUTBOX_PLAINTEXT'), 'symlink read did not leak plaintext');
     });
 
     // ---------------------------------------------------------------------------

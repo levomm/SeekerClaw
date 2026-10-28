@@ -179,6 +179,18 @@ test('P1: real handleMessage parses /outbox show string and sends the saved answ
     assert(!String(await mh.handleCommand(2, '/outbox', `show ${pending.deliveryId}`)).includes('private synthetic answer'));
 });
 
+test('path confinement does not break explicit /outbox recovery', async t => {
+    const h = fixture(t, 'timeout');
+    const pending = await h.tg.sendMessage(1, 'recoverable synthetic answer', 7, null, opts);
+    const listing = h.tg.outboxCommand(1, '');
+    assert.match(listing, new RegExp(pending.deliveryId));
+    assert.match(listing, /Use \/outbox show <id>/);
+    const shown = h.tg.outboxCommand(1, `show ${pending.deliveryId}`);
+    assert.match(shown, /recoverable synthetic answer/);
+    assert.equal(h.calls.length, 1, 'show is local recovery text, not an automatic resend');
+    assert.equal(h.tg.getOutbox().read(pending.deliveryId).text, 'recoverable synthetic answer');
+});
+
 for (const mode of ['timeout', 'ok']) test(`post-POST disk failure (${mode}) stays DELIVERY_PENDING and never creates a generic error reply`, async t => {
     const h = fixture(t, mode);
     const record = h.tg.prepareMessage(1, 'answer', 7, null, { deliveryKey: '7:final' });
