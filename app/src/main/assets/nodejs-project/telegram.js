@@ -842,7 +842,12 @@ async function sendMessage(chatId, text, replyTo = null, buttons = null, opts = 
         const current = getOutbox().read(delivery.id);
         if (current.state === 'acknowledged') return { status: current.state, messageId: current.messageId, deliveryId: current.id };
         if (current.state !== 'ready') return { status: current.state, deliveryId: current.id };
-        const result = await sendMessageOnce(chatId, text, replyTo, buttons, { ...opts, delivery: current });
+        if (Object.keys(current.parts).length) {
+            // A crash can leave READY with a confirmed prefix or an in-flight part.
+            // Do not switch rendering plans or replay any prefix after restart.
+            return getOutbox().finish(current.id, { status: 'uncertain' });
+        }
+        const result = await sendMessageOnce(chatId, current.text, current.replyTo, buttons, { ...opts, delivery: current });
         return getOutbox().finish(current.id, result);
     });
 }

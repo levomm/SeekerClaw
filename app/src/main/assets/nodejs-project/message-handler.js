@@ -90,7 +90,7 @@ async function deliverAgentText(chatId, rawText, messageId, replyToDefault, dedu
 
     const result = await deps.sendMessage(
         chatId, text, replyTo, null,
-        { deliveryKey: `${messageId}:${replyToDefault == null ? 'interim' : 'final'}`,
+        { deliveryKey: `${messageId}:${replyToDefault == null ? `interim:${_fp(text)}` : 'final'}`,
             ...(messageThreadId != null ? { messageThreadId } : {}) },
     );
     if (result?.status && result.status !== 'acknowledged') {
@@ -151,7 +151,8 @@ Send me anything to get started!`;
         }
 
         case '/outbox': {
-            return deps.outboxCommand ? deps.outboxCommand(chatId, args) : 'Saved-response recovery is available on Telegram.';
+            if (CHANNEL !== 'telegram' || !deps.outboxCommand) return 'Saved-response recovery is available on Telegram.';
+            return deps.outboxCommand(chatId, args);
         }
 
         case '/quick': {

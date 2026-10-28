@@ -38,7 +38,7 @@ class DeliveryOutbox {
         }
     }
     prepare(chatId, text, replyTo, key) {
-        const id = crypto.createHash('sha256').update(JSON.stringify([String(chatId), String(key), text])).digest('hex').slice(0, 32);
+        const id = crypto.createHash('sha256').update(JSON.stringify([String(chatId), String(key)])).digest('hex').slice(0, 32);
         if (fs.existsSync(this.file(id))) return this.read(id);
         const record = { id, chatId: String(chatId), text, replyTo: replyTo ?? null, createdAt: Date.now(), state: 'ready', parts: {} };
         this.save(record);

@@ -74,6 +74,25 @@ test('acknowledged send is deduplicated even after Rich flag changes', async t =
     assert.equal(h.calls.length, 1);
 });
 
+test('stable final delivery key keeps the first answer even if an input is regenerated', async t => {
+    const h = fixture(t);
+    h.tg.prepareMessage(1, 'first answer', 7, null, opts);
+    await h.tg.sendMessage(1, 'regenerated answer', 7, null, opts);
+    assert.equal(h.calls.length, 1);
+    assert.equal(h.calls[0].body.rich_message.markdown, 'first answer');
+    await h.tg.sendMessage(1, 'third answer', 7, null, opts);
+    assert.equal(h.calls.length, 1);
+});
+
+test('crashed READY record with acknowledged prefix cannot change render plans and resend', async t => {
+    const h = fixture(t);
+    const record = h.tg.prepareMessage(1, 'answer', 7, null, opts);
+    record.parts['html:0'] = { state: 'acknowledged', messageId: 123 };
+    h.tg.getOutbox().save(record);
+    const result = await h.tg.sendMessage(1, 'answer', 7, null, opts);
+    assert.equal(result.status, 'uncertain'); assert.equal(h.calls.length, 0);
+});
+
 test('concurrent duplicate calls serialize to one visible POST', async t => {
     const h = fixture(t);
     const results = await Promise.all(Array.from({ length: 10 }, () => h.tg.sendMessage(1, 'answer', 7, null, opts)));

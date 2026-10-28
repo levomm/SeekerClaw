@@ -20,7 +20,9 @@ Interactive final replies are saved in the app-private `delivery-outbox/` direct
 (outside workspace memory) before completed-task cleanup and before the first send.
 `[Delivery] Response saved; awaiting explicit /outbox recovery` and transport-error
 `delivery unconfirmed` / `possibly delivered; no classic fallback` messages mean
-**not acknowledged**, not success. The handler must not mark the reply done or
+**not acknowledged**, not success. `systemPlain send not acknowledged` and
+`systemPlain send failed — delivery unconfirmed` also mean no confirmed send.
+The handler must not mark the reply done or
 increment delivered-message stats. `/outbox` lists this chat's pending records;
 `/outbox show <id>` explicitly retrieves saved text without re-running tools. The
 uncertain original may already be visible. There is no automatic replay of an
@@ -31,7 +33,9 @@ new tracked sends. Outbox persistence failure prevents the first tracked POST;
 preserve pending files for recovery, never wipe them or memory to fix delivery.
 This is not an exactly-once guarantee and not an automatic retry queue. System
 notices, uploads and non-interactive sends without a delivery key are outside this
-interactive outbox contract. Missing acknowledgements / aborted responses are
+interactive outbox contract. Workspace Memory Export does not include this sibling
+outbox directory: an in-place update keeps it, but uninstalling loses it along with
+private app data. Missing acknowledgements / aborted responses are
 uncertain; HTTP timeout includes DNS/connect time. Do not infer broken IPv6 from
 ETIMEDOUT: inspect the transport phase; a separate HTTP/2 check is not the same POST.
 
