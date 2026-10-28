@@ -13,7 +13,7 @@ function pendingDeliveryError(id, cause) {
 class DeliveryOutbox {
     constructor(directory, namespace = '') {
         this.directory = directory; this.namespace = namespace;
-        this.queues = new Map(); this.nextSweepAt = 0;
+        this.queues = new Map(); this.nextSweepAt = 0; this.unreadableCount = 0;
     }
     file(id) {
         if (!/^[a-f0-9]{32}$/.test(id)) throw new Error('Invalid delivery ID');
@@ -115,9 +115,12 @@ class DeliveryOutbox {
         } catch (cause) { throw pendingDeliveryError(id, cause); }
     }
     list(chatId) {
-        this.prune();
+        this.prune(); this.unreadableCount = 0;
         if (!fs.existsSync(this.directory)) return [];
-        return fs.readdirSync(this.directory).filter(n => /^[a-f0-9]{32}\.json$/.test(n)).map(n => this.read(n.slice(0, -5)))
+        return fs.readdirSync(this.directory).filter(n => /^[a-f0-9]{32}\.json$/.test(n)).flatMap(n => {
+            try { return [this.read(n.slice(0, -5))]; }
+            catch (_) { this.unreadableCount++; return []; } // preserve bad files without blocking healthy answers
+        })
             .filter(r => r.chatId === String(chatId) && r.state !== 'acknowledged')
             .sort((a, b) => b.createdAt - a.createdAt);
     }

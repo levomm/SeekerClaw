@@ -36,9 +36,10 @@ function getOutbox() {
 function outboxCommand(chatId, args = []) {
     if (typeof args === 'string') args = args.trim().split(/\s+/).filter(Boolean);
     if (!args.length) {
-        const pending = getOutbox().list(chatId).slice(0, 10);
-        return pending.length ? 'Saved responses (not automatically resent):\n' + pending.map(r => `${r.id}: ${r.state}`).join('\n') +
-            '\nUse /outbox show <id> to explicitly retrieve one. An uncertain original may already be visible.' : 'No pending saved responses.';
+        const store = getOutbox(), pending = store.list(chatId).slice(0, 10);
+        const warning = store.unreadableCount ? '\nSome saved records are unreadable and were preserved; readable responses remain available.' : '';
+        return (pending.length ? 'Saved responses (not automatically resent):\n' + pending.map(r => `${r.id}: ${r.state}`).join('\n') +
+            '\nUse /outbox show <id> to explicitly retrieve one. An uncertain original may already be visible.' : 'No readable pending saved responses.') + warning;
     }
     if (args.length !== 2 || args[0] !== 'show' || !/^[a-f0-9]{32}$/.test(args[1] || '')) return 'Usage: /outbox or /outbox show <id>. No automatic resend.';
     let record;

@@ -40,6 +40,9 @@ cleared immediately; only a small deduplication tombstone is kept for 24 hours,
 then pruned on subsequent outbox activity (sweeps are throttled to once per minute).
 READY, rejected, uncertain, partial, unreadable and crash records are never pruned.
 `/outbox show <id>` accepts normal command text, not only an internal argument array.
+`Some saved records are unreadable` means such files were preserved, not deleted;
+the listing still exposes the readable pending records from the requesting chat.
+One malformed/inconsistent file must not block recovery of all healthy records.
 This is not an exactly-once guarantee and not an automatic retry queue. System
 notices, uploads and non-interactive sends without a delivery key are outside this
 interactive outbox contract. Workspace Memory Export does not include this sibling
@@ -102,7 +105,7 @@ grep -i "sendRichMessage\|systemPlain\|Plain-text fallback\|transient send" node
 - `sendRichMessage unsupported by this Bot API ...` — the API does not expose Rich Messages; Rich is disabled for the rest of the run and all replies use the classic pipeline. Nothing is lost.
 - `sendRichMessage failed (fallback/transient: ...) — falling back to classic HTML` — a deterministic formatting rejection allows classic fallback. 429/5xx instead produce `Telegram transient send failure — no immediate fallback`; they are not followed by a second visible POST.
 - `sendRichMessage transport error (possibly delivered; no classic fallback)` — the connection dropped after the request was sent, so the message MAY already be delivered; it is NOT resent (NO-DOUBLE-DELIVERY). If a reply seems missing, ask the user to confirm rather than blindly resending.
-**Fix:** No action for the unsupported/fallback cases — delivery still happens via the classic path. For repeated transient failures see "Telegram Rate Limited (429)" above. The **Rich Messages** switch in Settings → Channel → Telegram applies live to subsequent replies without restarting. The Channel screen must not show a restart dialog for this toggle. Environment defaults are startup settings; edit the live toggle for immediate changes.
+**Fix:** Unsupported/formatting rejection allows a classic send attempt; only an acknowledgement confirms delivery. For transient or uncertain outcomes, use `/outbox` recovery rather than assuming the classic path succeeded. For repeated transient failures see "Telegram Rate Limited (429)" above. The **Rich Messages** switch in Settings → Channel → Telegram applies live to subsequent replies without restarting. The Channel screen must not show a restart dialog for this toggle. Environment defaults are startup settings; edit the live toggle for immediate changes.
 
 ### System Notices Render Plain Even With Rich On (expected)
 **Symptoms:** Heartbeat alerts, "Back online", status/thinking bubbles, and auto-resume notices appear as plain text although Rich is enabled.

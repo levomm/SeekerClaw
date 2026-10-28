@@ -15,6 +15,15 @@ No merge, installation or device-data changes are part of this follow-up.
 | 7 | 4396305282 | Both full prompt formatting branches and diagnostics describe live Rich behavior. | Same suite executes both actual formatting branches and checks live/no-restart wording; compact prompt knowledge probe remains gated. |
 | 8 | 4396305297 | Actual ChannelConfigScreen uses a tested Rich restart exemption and live help copy; other fields retain their restart gate. | `ChannelSettingsPolicyTest` (Rich, channel/credentials, unknown fields), plus actual-screen wiring/copy guard. |
 
+## Fresh review 5677257487 — additional P2 (4396473996)
+
+The first independent follow-up identified one further recovery issue: retained
+unreadable records blocked the entire pending list. Listing now skips unreadable
+entries without deleting them, still filters healthy records by chat, and surfaces
+a preservation warning. A dedicated real-sender/outbox regression creates two
+chat-scoped pending replies and malformed JSON, checks the usable listing and
+warning, preserves the exact corrupt file, and proves no pending POST is replayed.
+
 The added automated cases are offline/JVM checks, not Android UI instrumentation,
 real Telegram/Tavily calls, a full live-model SAB or phone E2E. Exact commit, CI
 results and fresh review receipt are recorded in PR #17 after execution. Original

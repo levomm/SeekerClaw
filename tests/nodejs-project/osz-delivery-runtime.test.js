@@ -223,10 +223,27 @@ test('ACK text clears immediately and only ACK tombstones expire; pending and co
     assert(fs.existsSync(store.file(recent.id)));
     assert(fs.readFileSync(store.file(inconsistent.id), 'utf8').includes('must not be erased'));
     assert.equal(fs.readFileSync(store.file(corrupt), 'utf8'), '{');
+    assert.equal(store.list(1).length, 3); assert.equal(store.unreadableCount, 2);
     for (const status of ['ready', 'uncertain', 'rejected']) {
         const retained = store.prepare(1, 'ignored', 7, status);
         assert.equal(retained.text, 'pending private text');
     }
+});
+
+test('fresh review: a corrupt record cannot block /outbox listing healthy, chat-scoped pending answers', async t => {
+    const h = fixture(t, 'timeout');
+    const own = await h.tg.sendMessage(1, 'own pending answer', 7, null, opts);
+    const foreign = await h.tg.sendMessage(2, 'other-chat private answer', 7, null, opts);
+    const store = h.tg.getOutbox(), badFile = store.file('f'.repeat(32));
+    fs.writeFileSync(badFile, '{');
+    const listing = h.tg.outboxCommand(1, '');
+    assert(listing.includes(own.deliveryId)); assert(!listing.includes(foreign.deliveryId));
+    assert(listing.includes('Some saved records are unreadable'));
+    assert.equal(fs.readFileSync(badFile, 'utf8'), '{');
+    assert.equal(store.read(own.deliveryId).text, 'own pending answer');
+    assert.equal(h.calls.length, 2); // listing does not replay either pending POST
+    const diagnostics = fs.readFileSync(path.join(bundle, 'DIAGNOSTICS.md'), 'utf8');
+    assert(diagnostics.includes('Some saved records are unreadable'));
 });
 
 test('bot namespaces isolate pending text and dedup IDs while same-bot token rotation preserves them', async t => {

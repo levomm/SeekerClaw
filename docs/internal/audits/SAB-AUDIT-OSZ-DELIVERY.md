@@ -30,6 +30,11 @@ explicitly covers valid revocation without erasing Android-owned credentials.
 Both real full-formatting branches are executed by tests, not merely checked for
 a new global sentence that can coexist with stale opposite instructions.
 
+The follow-up review added a genuine P2: one malformed retained record must not
+block other pending responses. The `/outbox` preservation warning now has a
+DIAGNOSTICS recovery entry and an executable healthy-listing/chat-isolation probe.
+No claim of a clean independent review is made until the latest receipt arrives.
+
 ## Executed behavioral/code probes
 
 The CI-gated `osz-delivery-runtime.test.js` drives the actual sender, outbox, handler,
