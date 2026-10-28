@@ -1017,25 +1017,35 @@ function serviceToConfigField(service) {
     return `${normalized}ApiKey`;
 }
 
+const _conversationalKeys = new Map();
 function syncAgentApiKeys() {
     try {
         const settingsPath = path.join(workDir, 'agent_settings.json');
         if (!fs.existsSync(settingsPath)) return;
         const s = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-        if (!s.apiKeys || typeof s.apiKeys !== 'object') return;
-        // Dynamic: load ALL keys from apiKeys.*, not just known ones
-        for (const [service, agentKey] of Object.entries(s.apiKeys)) {
-            const configField = serviceToConfigField(service);
-            if (!configField) continue;
-            // Android Settings keys always win — don't overwrite
-            if (_androidKeys[configField]) continue;
-            if (agentKey && typeof agentKey === 'string' && agentKey.trim() && agentKey.length <= 512) {
+        if (!s || typeof s !== 'object' || Array.isArray(s)) return;
+        const apiKeys = s.apiKeys ?? {};
+        if (typeof apiKeys !== 'object' || Array.isArray(apiKeys)) return;
+        const next = new Map();
+        for (const [service, agentKey] of Object.entries(apiKeys)) {
+            const field = serviceToConfigField(service);
+            if (!field || _androidKeys[field]) continue;
+            if (typeof agentKey === 'string' && agentKey.trim() && agentKey.length <= 512) {
                 const normalized = normalizeSecret(agentKey);
-                if (normalized && config[configField] !== normalized) {
-                    config[configField] = normalized;
-                    // Log configField (sanitized) instead of raw service name to prevent log injection
-                    log(`[Config] Loaded API key → config.${configField} from agent_settings.json`, 'INFO');
-                }
+                if (normalized) next.set(field, normalized);
+            }
+        }
+        // Revoke only values this reader installed; never erase Android/other owners.
+        // Missing/bad files keep the prior snapshot; a valid removal/blank revokes it.
+        for (const [field, previous] of _conversationalKeys) {
+            if (!next.has(field) && !_androidKeys[field] && config[field] === previous) delete config[field];
+        }
+        _conversationalKeys.clear();
+        for (const [field, normalized] of next) {
+            _conversationalKeys.set(field, normalized);
+            if (config[field] !== normalized) {
+                config[field] = normalized;
+                log(`[Config] Loaded API key → config.${field} from agent_settings.json`, 'INFO');
             }
         }
     } catch (_) {}

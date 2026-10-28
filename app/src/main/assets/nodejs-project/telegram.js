@@ -8,19 +8,43 @@ const https = require('https');
 const path = require('path');
 
 const { BOT_TOKEN, log, workDir, getOwnerId, RICH_MESSAGES_ENABLED, runtimeSettings } = require('./config');
-const { DeliveryOutbox } = require('./delivery-outbox');
+const { DeliveryOutbox, pendingDeliveryError } = require('./delivery-outbox');
 let outbox;
-function getOutbox() { return outbox ||= new DeliveryOutbox(path.join(path.dirname(workDir), 'delivery-outbox')); }
+let nextOutboxSweepAt = 0;
+function getOutbox() {
+    // Numeric bot identity survives token rotation; no token is written to disk.
+    const token = String(BOT_TOKEN || '');
+    const botId = /^\d+:/.test(token) ? token.split(':')[0] : token;
+    const namespace = crypto.createHash('sha256').update(botId).digest('hex').slice(0, 32);
+    const root = path.join(path.dirname(workDir), 'delivery-outbox');
+    outbox ||= new DeliveryOutbox(path.join(root, namespace), namespace);
+    const now = Date.now();
+    if (now >= nextOutboxSweepAt) {
+        nextOutboxSweepAt = now + 60000;
+        // A bot switch must not leave expired ACKs in the inactive bot's folder.
+        // Every sweep still uses the same strict ACK-only preservation checks.
+        try {
+            for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+                if (entry.isDirectory() && /^[a-f0-9]{32}$/.test(entry.name)) {
+                    new DeliveryOutbox(path.join(root, entry.name), entry.name).prune(now);
+                }
+            }
+        } catch (_) { /* best-effort housekeeping, never mask pending delivery */ }
+    }
+    return outbox;
+}
 function outboxCommand(chatId, args = []) {
+    if (typeof args === 'string') args = args.trim().split(/\s+/).filter(Boolean);
     if (!args.length) {
         const pending = getOutbox().list(chatId).slice(0, 10);
         return pending.length ? 'Saved responses (not automatically resent):\n' + pending.map(r => `${r.id}: ${r.state}`).join('\n') +
             '\nUse /outbox show <id> to explicitly retrieve one. An uncertain original may already be visible.' : 'No pending saved responses.';
     }
-    if (args[0] !== 'show' || !/^[a-f0-9]{32}$/.test(args[1] || '')) return 'Usage: /outbox or /outbox show <id>. No automatic resend.';
+    if (args.length !== 2 || args[0] !== 'show' || !/^[a-f0-9]{32}$/.test(args[1] || '')) return 'Usage: /outbox or /outbox show <id>. No automatic resend.';
     let record;
     try { record = getOutbox().read(args[1]); } catch (_) { return 'Saved response not available.'; }
     if (record.chatId !== String(chatId)) return 'Saved response not available.';
+    if (record.state === 'acknowledged') return 'Already acknowledged by Telegram; saved text has been cleared. Check the original chat message.';
     return 'Saved response requested by you (the original delivery may be uncertain):\n\n' + record.text;
 }
 function prepareMessage(chatId, text, replyTo, buttons, opts = {}) {
@@ -847,8 +871,10 @@ async function sendMessage(chatId, text, replyTo = null, buttons = null, opts = 
             // Do not switch rendering plans or replay any prefix after restart.
             return getOutbox().finish(current.id, { status: 'uncertain' });
         }
-        const result = await sendMessageOnce(chatId, current.text, current.replyTo, buttons, { ...opts, delivery: current });
-        return getOutbox().finish(current.id, result);
+        try {
+            const result = await sendMessageOnce(chatId, current.text, current.replyTo, buttons, { ...opts, delivery: current });
+            return getOutbox().finish(current.id, result);
+        } catch (cause) { throw pendingDeliveryError(current.id, cause); }
     });
 }
 

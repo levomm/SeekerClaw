@@ -18,6 +18,18 @@ behavioral benchmark was run. Baseline: SAB-AUDIT-v47.
    vocabulary now has a DIAGNOSTICS entry and recovery door, without suggesting a
    memory reset, blind retry or an IPv6 diagnosis.
 
+## PR #17 review follow-up
+
+Review 5677022913 exposed eight real gaps after the first green suites, including
+an untested string/array command boundary and stale full-formatting/Channel UI
+restart instructions. They are not dismissed as already-tested behavior. See
+`docs/internal/OSZ-PR17-REVIEW-FIXES.md` for each finding, repair and regression.
+Full and compact prompts now explain bot-scoped recovery, ACK-only text cleanup
+and 24-hour deduplication (pending text never expires); key-refresh knowledge
+explicitly covers valid revocation without erasing Android-owned credentials.
+Both real full-formatting branches are executed by tests, not merely checked for
+a new global sentence that can coexist with stale opposite instructions.
+
 ## Executed behavioral/code probes
 
 The CI-gated `osz-delivery-runtime.test.js` drives the actual sender, outbox, handler,

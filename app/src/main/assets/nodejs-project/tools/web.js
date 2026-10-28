@@ -18,7 +18,7 @@ const {
 const tools = [
     {
         name: 'web_search',
-        description: 'Search the web for current information using the live Settings provider (or an explicit provider override). Conversational search API keys are refreshed before each call; changing Android-managed keys requires a controlled service restart. Results are cached separately per provider.',
+        description: 'Search the web for current information using the live Settings provider (or an explicit provider override). Conversational search API keys are refreshed before each call, including revocation after valid removal/blanking; Android-managed keys are protected and changing them requires a controlled service restart. Results are cached separately per provider.',
         input_schema: {
             type: 'object',
             properties: {

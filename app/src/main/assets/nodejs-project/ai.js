@@ -974,7 +974,7 @@ function buildSystemBlocks(matchedSkills = [], chatId = null, activeModel = MODE
         lines.push('- Do NOT use raw HTML tags (<details>, <sub>, <sup>, <tg-*>, etc.) — they are shown as literal text, not rendered.');
         lines.push('- To send images/media, use send_file — markdown image syntax ![](url) is NOT rendered (it is neutered for safety).');
         lines.push('- Rich rendering can degrade to plain formatting on older Telegram clients, so do not rely on it for critical meaning.');
-        lines.push('- The user can turn Rich Messages off in Settings -> Channel -> Telegram -> Rich Messages (it applies after a service restart) — tell them this if they ask for plainer replies or to stop tables/headings.');
+        lines.push('- The user can turn Rich Messages off in Settings -> Channel -> Telegram -> Rich Messages (applies live to subsequent sends; no service restart needed) — tell them this if they ask for plainer replies or to stop tables/headings.');
         lines.push('- If a reply you sent with rich formatting (tables/headings) arrived as PLAIN text, the rich send was rejected or unsupported and SeekerClaw automatically fell back to the classic formatting pipeline — the message was still delivered ONCE (no duplicate). System notices (heartbeats/status bubbles) are always plain by design, not a bug. See DIAGNOSTICS.md -> "Rich Messages Falling Back to Classic Formatting" / "System Notices Render Plain Even With Rich On" to explain it.');
         lines.push('');
     } else if (CHANNEL === 'telegram') {
@@ -985,7 +985,7 @@ function buildSystemBlocks(matchedSkills = [], chatId = null, activeModel = MODE
         lines.push('- Use emoji + bold for structure: **💰 Prices Right Now**');
         lines.push('- Use markdown-style **bold**, _italic_, `code`, ```code blocks``` and blockquotes; these will be converted for Telegram. Do NOT use raw HTML tags in replies.');
         lines.push('- Keep responses scannable with line breaks and emoji, not headers.');
-        lines.push('- Richer formatting (tables, headings, math) is available — the user can enable Rich Messages in Settings -> Channel -> Telegram -> Rich Messages (it applies after a service restart).');
+        lines.push('- Richer formatting (tables, headings, math) is available — the user can enable Rich Messages in Settings -> Channel -> Telegram -> Rich Messages (applies live to subsequent sends; no service restart needed).');
         lines.push('');
     } else if (CHANNEL === 'discord') {
         lines.push('**Discord Formatting (for user-visible Discord replies)**');
@@ -1131,7 +1131,7 @@ function buildSystemBlocks(matchedSkills = [], chatId = null, activeModel = MODE
     lines.push('   - Use Android Settings to store keys securely (they won\'t appear in chat history)"');
     lines.push('');
     lines.push('Search keys in agent_settings.json are refreshed before each web_search. Android Settings keys take precedence and changing those keys requires a controlled service restart. Never print keys to diagnose configuration.');
-    lines.push('Telegram interactive final answers are saved to an app-private delivery outbox before task cleanup. A timeout is NOT confirmed delivery: no blind resend. Users can list pending answers with /outbox and explicitly recover text with /outbox show <id>; the original uncertain message may already be visible. STOP pauses sending. Rich rendering, maxStepsPerTurn and heartbeat interval are read live from agent_settings.json; failed reads retain last valid values.');
+    lines.push('Telegram interactive final answers are saved to an app-private delivery outbox before task cleanup. A timeout is NOT confirmed delivery: no blind resend. Users can list pending answers with /outbox and explicitly recover text with /outbox show <id>; the original uncertain message may already be visible. Records are bot-scoped: only confirmed text is cleared, with a 24-hour dedup tombstone; pending text does not expire. STOP pauses sending. Rich rendering, maxStepsPerTurn and heartbeat interval are read live from agent_settings.json; failed reads retain last valid values.');
     lines.push('If asked about config issues, check agent_settings.json and PLATFORM.md.');
     lines.push('**Quick model/provider switch from chat (BAT-504):** Users can run `/model <name>` and `/provider <claude|openai|openrouter|custom|xai>` directly in Telegram instead of opening Settings → AI Provider. Both write to runtime_state.json (live overlay) and survive restart. If the user asks how to switch model or provider, point them at these commands first.');
     lines.push('**Your model can change mid-conversation (BAT-1083):** The active model is re-resolved every turn, so a switch in Settings or via `/model` takes effect on your very next reply — your "Model:" line above always reflects the CURRENT model. You cannot see your own PAST model values across a conversation. If a user asks why an earlier reply named a different model, say it was most likely switched between turns — do NOT guess or claim you "misread" it.');

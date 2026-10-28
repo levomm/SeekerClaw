@@ -7,7 +7,7 @@ const path = require('path');
 const vm = require('vm');
 const { EventEmitter } = require('events');
 const bundle = path.resolve(__dirname, '../../app/src/main/assets/nodejs-project');
-const { DeliveryOutbox } = require(path.join(bundle, 'delivery-outbox'));
+const { DeliveryOutbox, ACK_RETENTION_MS } = require(path.join(bundle, 'delivery-outbox'));
 const { createRuntimeSettings } = require(path.join(bundle, 'runtime-settings'));
 function temp(t) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'osz-regression-'));
@@ -22,12 +22,12 @@ function load(name, deps) {
     }, { filename: name });
     return module.exports;
 }
-function fixture(t, mode = 'ok', rich = true) {
-    const root = temp(t), workDir = path.join(root, 'workspace'); fs.mkdirSync(workDir);
+function fixture(t, mode = 'ok', rich = true, extra = {}) {
+    const root = extra.root || temp(t), workDir = path.join(root, 'workspace'); fs.mkdirSync(workDir, { recursive: true });
     const settingsPath = path.join(workDir, 'agent_settings.json');
     fs.writeFileSync(settingsPath, JSON.stringify({ maxStepsPerTurn: 12, heartbeatIntervalMinutes: 60, richMessages: rich }));
     const runtimeSettings = createRuntimeSettings(workDir, { richMessages: rich });
-    const calls = [], config = { workDir, BOT_TOKEN: 'synthetic', getOwnerId: () => '1', log: () => {}, RICH_MESSAGES_ENABLED: rich, runtimeSettings };
+    const calls = [], config = { workDir, BOT_TOKEN: extra.token || 'synthetic', getOwnerId: () => '1', log: () => {}, RICH_MESSAGES_ENABLED: rich, runtimeSettings };
     let current = mode, counter = 100;
     const tg = load('telegram.js', {
         './config': config, './security': { redactSecrets: x => x }, './web': { isBlockedAddress: () => false },
@@ -43,13 +43,32 @@ function fixture(t, mode = 'ok', rich = true) {
     });
     return { tg, calls, root, settingsPath, setMode: v => { current = v; } };
 }
+function messageHandler(h) {
+    const mh = load('message-handler.js', {
+        './config': { CHANNEL: 'telegram', workDir: path.dirname(h.settingsPath), config: {} },
+        './model-catalog': {}, './telegram-commands': {}, './quiesce': { isQuiesced: () => false },
+    });
+    const state = { sends: [], done: 0, stats: 0, chats: 0 };
+    const noop = async () => {};
+    mh.init({
+        log: () => {}, getOwnerId: () => '1', sendTyping: noop,
+        lastIncomingMessages: new Map(), redactSecrets: x => x,
+        createStatusReactionController: () => ({ setQueued: noop, setThinking: noop, setError: noop, clear: noop,
+            setDone: async () => { state.done++; } }),
+        androidBridgeCall: async endpoint => { if (endpoint === '/stats/message') state.stats++; return {}; },
+        prepareMessage: h.tg.prepareMessage, outboxCommand: h.tg.outboxCommand,
+        chat: async (_, __, options) => { state.chats++; await options.persistFinal('answer'); return 'answer'; },
+        sendMessage: async (...args) => { state.sends.push(args[1]); return h.tg.sendMessage(...args); },
+    });
+    return { mh, state };
+}
 const opts = { deliveryKey: 'incoming-7:final' };
 
 test('answer is on disk BEFORE the first send and survives a new store instance', async t => {
     const h = fixture(t, 'timeout');
     const record = h.tg.prepareMessage(1, 'synthetic answer', 7, null, opts);
     assert.equal(h.calls.length, 0);
-    assert.equal(new DeliveryOutbox(path.join(h.root, 'delivery-outbox')).read(record.id).text, 'synthetic answer');
+    assert.equal(new DeliveryOutbox(h.tg.getOutbox().directory).read(record.id).text, 'synthetic answer');
     const result = await h.tg.sendMessage(1, 'synthetic answer', 7, null, opts);
     assert.equal(result.status, 'uncertain');
     assert.equal(h.calls.length, 1);
@@ -124,7 +143,7 @@ test('crash after persisted ATTEMPTING never replays the POST', async t => {
     const record = store.prepare(1, 'answer', 7, 'stable');
     record.parts.rich = { state: 'attempting' }; store.save(record);
     let sends = 0;
-    await assert.rejects(store.attempt(record.id, 'rich', async () => { sends++; }), /explicit recovery/);
+    await assert.rejects(store.attempt(record.id, 'rich', async () => { sends++; }), e => e.code === 'DELIVERY_PENDING');
     assert.equal(sends, 0); assert.equal(store.read(record.id).text, 'answer');
 });
 
@@ -143,6 +162,152 @@ test('/outbox only reveals answers to their original chat and explicit show does
     assert(!h.tg.outboxCommand(2, ['show', r.deliveryId]).includes('private synthetic answer'));
     assert(!h.tg.outboxCommand(1, ['show', '../bad']).includes('private synthetic answer'));
     assert.equal(h.calls.length, 1);
+});
+
+test('P1: real handleMessage parses /outbox show string and sends the saved answer', async t => {
+    const h = fixture(t, 'timeout');
+    const pending = await h.tg.sendMessage(1, 'private synthetic answer', 7, null, opts);
+    h.setMode('ok');
+    const { mh, state } = messageHandler(h);
+    await mh.handleMessage({ chatId: '1', senderId: '1', text: `/outbox show ${pending.deliveryId}`, messageId: 8 });
+    assert.equal(state.chats, 0); // recovery must not rerun AI/tools
+    assert.equal(h.calls.length, 2); // original ambiguous POST + one explicit retrieval
+    assert(h.calls[1].body.rich_message.markdown.includes('private synthetic answer'));
+    assert.equal(h.tg.getOutbox().read(pending.deliveryId).text, 'private synthetic answer');
+    assert.match(await mh.handleCommand(1, '/outbox', `  show   ${pending.deliveryId}  `), /private synthetic answer/);
+    assert.match(await mh.handleCommand(1, '/outbox', 'show ../bad'), /Usage/);
+    assert(!String(await mh.handleCommand(2, '/outbox', `show ${pending.deliveryId}`)).includes('private synthetic answer'));
+});
+
+for (const mode of ['timeout', 'ok']) test(`post-POST disk failure (${mode}) stays DELIVERY_PENDING and never creates a generic error reply`, async t => {
+    const h = fixture(t, mode);
+    const record = h.tg.prepareMessage(1, 'answer', 7, null, { deliveryKey: '7:final' });
+    const store = h.tg.getOutbox(), originalSave = store.save.bind(store);
+    let saves = 0;
+    store.save = value => { if (++saves > 1) throw Object.assign(new Error('synthetic ENOSPC'), { code: 'ENOSPC' }); return originalSave(value); };
+    const { mh, state } = messageHandler(h);
+    await mh.handleMessage({ chatId: '1', senderId: '1', text: 'synthetic prompt', messageId: 7 });
+    assert.deepEqual(state.sends, ['answer']); assert.equal(h.calls.length, 1);
+    assert.equal(state.done, 0); assert.equal(state.stats, 0);
+    assert.equal(store.read(record.id).parts.rich.state, 'attempting');
+    assert.equal(store.read(record.id).text, 'answer');
+    await assert.rejects(h.tg.sendMessage(1, 'answer', 7, null, { deliveryKey: '7:final' }), e => e.code === 'DELIVERY_PENDING');
+    assert.equal(h.calls.length, 1);
+    store.save = originalSave;
+    assert.equal((await h.tg.sendMessage(1, 'answer', 7, null, { deliveryKey: '7:final' })).status, 'uncertain');
+    assert.equal(h.calls.length, 1);
+});
+
+test('ACK text clears immediately and only ACK tombstones expire; pending and corrupt records survive', async t => {
+    const store = new DeliveryOutbox(path.join(temp(t), 'outbox'));
+    const ack = store.prepare(1, 'sensitive synthetic reply', 7, 'ack');
+    await store.attempt(ack.id, 'rich', async () => ({ ok: true, result: { message_id: 123 } }));
+    store.finish(ack.id, { messageId: 123 });
+    assert.equal(store.read(ack.id).text, '');
+    const cutoff = Date.now() + ACK_RETENTION_MS + 60001;
+    for (const status of ['ready', 'uncertain', 'rejected']) {
+        const record = store.prepare(1, 'pending private text', 7, status);
+        record.createdAt = 1; record.state = status;
+        if (status === 'uncertain') record.parts.rich = { state: 'attempting' };
+        store.save(record);
+    }
+    const recent = store.prepare(1, 'recent reply', 7, 'recent');
+    await store.attempt(recent.id, 'rich', async () => ({ ok: true, result: { message_id: 124 } }));
+    store.finish(recent.id, { messageId: 124 });
+    const recentRecord = store.read(recent.id); recentRecord.acknowledgedAt = cutoff - 1000; store.save(recentRecord);
+    const inconsistent = store.prepare(1, 'must not be erased', 7, 'inconsistent');
+    inconsistent.state = 'acknowledged'; inconsistent.messageId = 125; inconsistent.parts.rich = { state: 'attempting' }; store.save(inconsistent);
+    const corrupt = 'f'.repeat(32); fs.writeFileSync(store.file(corrupt), '{');
+    store.prune(cutoff);
+    assert(!fs.existsSync(store.file(ack.id)));
+    assert(fs.existsSync(store.file(recent.id)));
+    assert(fs.readFileSync(store.file(inconsistent.id), 'utf8').includes('must not be erased'));
+    assert.equal(fs.readFileSync(store.file(corrupt), 'utf8'), '{');
+    for (const status of ['ready', 'uncertain', 'rejected']) {
+        const retained = store.prepare(1, 'ignored', 7, status);
+        assert.equal(retained.text, 'pending private text');
+    }
+});
+
+test('bot namespaces isolate pending text and dedup IDs while same-bot token rotation preserves them', async t => {
+    const root = temp(t);
+    const one = fixture(t, 'timeout', true, { root, token: '100:old-token' });
+    const pending = await one.tg.sendMessage(1, 'bot one private text', 7, null, opts);
+    const two = fixture(t, 'ok', true, { root, token: '200:other-token' });
+    const delivered = await two.tg.sendMessage(1, 'bot two answer', 7, null, opts);
+    assert.equal(two.calls.length, 1); assert.equal(delivered.status, 'acknowledged');
+    assert.notEqual(delivered.deliveryId, pending.deliveryId);
+    assert(!two.tg.outboxCommand(1, `show ${pending.deliveryId}`).includes('bot one private text'));
+    const rotated = fixture(t, 'ok', true, { root, token: '100:rotated-token' });
+    assert.equal((await rotated.tg.sendMessage(1, 'regenerated', 7, null, opts)).deliveryId, pending.deliveryId);
+    assert.equal(rotated.calls.length, 0);
+    assert(rotated.tg.outboxCommand(1, `show ${pending.deliveryId}`).includes('bot one private text'));
+});
+
+test('ACK cleanup also covers an inactive bot namespace but never its pending answers', async t => {
+    const root = temp(t);
+    const old = fixture(t, 'ok', true, { root, token: '100:old-token' });
+    const ack = await old.tg.sendMessage(1, 'confirmed text', 7, null, opts);
+    const store = old.tg.getOutbox(), tombstone = store.read(ack.deliveryId);
+    tombstone.acknowledgedAt = Date.now() - ACK_RETENTION_MS - 60001; store.save(tombstone);
+    old.setMode('timeout');
+    const pending = await old.tg.sendMessage(1, 'keep pending text', 8, null, { deliveryKey: '8:final' });
+    const active = fixture(t, 'ok', true, { root, token: '200:active-token' });
+    active.tg.getOutbox();
+    assert(!fs.existsSync(store.file(ack.deliveryId)));
+    assert.equal(store.read(pending.deliveryId).text, 'keep pending text');
+});
+
+test('conversational key revocation follows valid removals/blanks and never erases Android keys', t => {
+    const dir = temp(t), file = path.join(dir, 'agent_settings.json');
+    const source = fs.readFileSync(path.join(bundle, 'config.js'), 'utf8');
+    const section = source.slice(source.indexOf('const _knownKeyMap ='), source.indexOf('// Run once at startup\nsyncAgentApiKeys();'));
+    const config = { braveApiKey: 'synthetic-android-owned' };
+    const context = { fs, path, workDir: dir, config, normalizeSecret: x => x.trim(), log: () => {} };
+    vm.runInNewContext(section, context);
+    fs.writeFileSync(file, JSON.stringify({ apiKeys: { tavily: 'synthetic-one', brave: 'do-not-override' } }));
+    context.syncAgentApiKeys(); assert.equal(config.tavilyApiKey, 'synthetic-one');
+    fs.writeFileSync(file, '{'); context.syncAgentApiKeys(); assert.equal(config.tavilyApiKey, 'synthetic-one');
+    fs.writeFileSync(file, JSON.stringify({ apiKeys: { tavily: ' ' } })); context.syncAgentApiKeys();
+    assert.equal(config.tavilyApiKey, undefined); assert.equal(config.braveApiKey, 'synthetic-android-owned');
+    fs.writeFileSync(file, JSON.stringify({ apiKeys: { tavily: 'synthetic-two' } })); context.syncAgentApiKeys();
+    assert.equal(config.tavilyApiKey, 'synthetic-two');
+    fs.writeFileSync(file, '{}'); context.syncAgentApiKeys();
+    assert.equal(config.tavilyApiKey, undefined); assert.equal(config.braveApiKey, 'synthetic-android-owned');
+    fs.writeFileSync(file, JSON.stringify({ apiKeys: { tavily: 'synthetic-three' } })); context.syncAgentApiKeys();
+    config.tavilyApiKey = 'synthetic-other-owner';
+    fs.writeFileSync(file, '{}'); context.syncAgentApiKeys();
+    assert.equal(config.tavilyApiKey, 'synthetic-other-owner');
+});
+
+test('both full Telegram formatting prompt branches describe live Rich, never a required restart', () => {
+    const ai = fs.readFileSync(path.join(bundle, 'ai.js'), 'utf8');
+    const section = ai.slice(ai.indexOf('    // Channel formatting'), ai.indexOf('    // Skills section'));
+    for (const rich of [false, true]) {
+        const lines = []; vm.runInNewContext(section, { CHANNEL: 'telegram', runtimeSettings: { read: () => ({ richMessages: rich }) }, lines });
+        const prompt = lines.join('\n');
+        assert(prompt.includes('applies live to subsequent sends; no service restart needed'));
+        assert(!prompt.includes('it applies after a service restart'));
+    }
+});
+
+test('actual ChannelConfigScreen exempts Rich from restart, but retains channel/token restart behavior', () => {
+    const screen = fs.readFileSync(path.resolve(bundle, '../../java/com/seekerclaw/app/ui/settings/ChannelConfigScreen.kt'), 'utf8');
+    assert(screen.includes('if (ChannelSettingsPolicy.requiresRestart(field)) showRestartDialog = true'));
+    assert(screen.includes('Applies live to subsequent replies; no restart needed.'));
+    assert(!screen.includes('Restart applies the change.'));
+});
+
+test('ConfigManager wires full preference and both cross-process preimages into the tested rollback coordinator', () => {
+    const source = fs.readFileSync(path.resolve(bundle, '../../java/com/seekerclaw/app/config/ConfigManager.kt'), 'utf8');
+    assert(source.includes('val preSavePrefs = sp.all.toMap()'));
+    assert(source.includes('val publication = SettingsPublication.finish('));
+    assert(source.includes('for ((key, value) in preSavePrefs)'));
+    assert.equal((source.match(/val rollbackOk = restoreSavedPrefs\(\)/g) || []).length, 2);
+    assert(source.includes('val restored = runCatching { restoreSavedPrefs() }'));
+    assert(source.includes('RuntimeStateStore.update { _ -> preForwardRuntime!! }'));
+    assert(source.includes('AgentPreferencesStore.restoreSnapshot(preForwardAgentPrefs!!)'));
+    assert(source.indexOf('if (!publication.published)') < source.indexOf('// R4 Copilot (BAT-549)'));
 });
 
 test('outbox storage failure prevents the first network call', async t => {

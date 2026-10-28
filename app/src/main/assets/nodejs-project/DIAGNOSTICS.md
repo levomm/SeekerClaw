@@ -17,7 +17,9 @@ The agent runs on one of two channels, configured by the `CHANNEL` setting (`tel
 ### Saved responses, timeouts and `/outbox`
 
 Interactive final replies are saved in the app-private `delivery-outbox/` directory
-(outside workspace memory) before completed-task cleanup and before the first send.
+(outside workspace memory, partitioned by stable Telegram bot identity) before
+completed-task cleanup and before the first send. Token rotation for the same bot
+keeps its records; a different bot cannot read or deduplicate another bot's replies.
 `[Delivery] Response saved; awaiting explicit /outbox recovery` and transport-error
 `delivery unconfirmed` / `possibly delivered; no classic fallback` messages mean
 **not acknowledged**, not success. `systemPlain send not acknowledged` and
@@ -31,6 +33,13 @@ a crash. Known acknowledged chunks are never implicitly resent. 429/5xx do not
 immediately fall through from Rich to another visible send. STOP/quiescence pauses
 new tracked sends. Outbox persistence failure prevents the first tracked POST;
 preserve pending files for recovery, never wipe them or memory to fix delivery.
+If writing a post-attempt state fails, the saved ATTEMPTING record remains a replay
+fence and the error is still DELIVERY_PENDING: never add a generic visible error
+reply after a possibly accepted POST. On full acknowledgement, saved reply text is
+cleared immediately; only a small deduplication tombstone is kept for 24 hours,
+then pruned on subsequent outbox activity (sweeps are throttled to once per minute).
+READY, rejected, uncertain, partial, unreadable and crash records are never pruned.
+`/outbox show <id>` accepts normal command text, not only an internal argument array.
 This is not an exactly-once guarantee and not an automatic retry queue. System
 notices, uploads and non-interactive sends without a delivery key are outside this
 interactive outbox contract. Workspace Memory Export does not include this sibling
@@ -47,7 +56,10 @@ replaced by a startup 35. The per-turn `[RuntimeSettings] turn=... maxSteps=...`
 shows the actual budget captured at turn start. A change during a turn applies to
 the next turn. `[Config] Failed to publish agent_settings.json; previous file preserved`
 means Android publication failed; Settings shows an error rather than silently
-claiming successful publication. Existing unknown fields / API keys are preserved;
+claiming successful publication. `[Config] Settings publication failed; rollback ...`
+reports whether preferences and both cross-process preimages were restored. A
+rollback failure remains a failed save; do not claim restoration succeeded if a
+reported flag is false. Existing unknown fields / API keys are preserved;
 do not replace a malformed file with an empty object. Publishing uses AtomicFile.
 
 Heartbeat minutes (5..120) are read at each one-minute scheduler check: 60 means
@@ -56,7 +68,9 @@ Rich toggles are read live without a restart. Turning Rich off can isolate a
 format/method problem but does not solve ambiguous transport delivery by itself.
 Tavily provider selection is live from agent_preferences.json; explicit tool
 provider arguments override it. Conversational search keys are synchronized before
-each web_search, but Android-managed keys keep precedence and require a controlled
+each web_search, including revoking file-owned keys removed/blanked in a valid
+snapshot; malformed/unreadable snapshots retain the last valid keys. Android-managed
+keys are never cleared by conversational-file revocation, keep precedence and require a controlled
 restart after editing. Check provider and key-presence booleans only; never print
 secrets. Provider-specific cache keys prevent reuse of another provider's results.
 
@@ -86,9 +100,9 @@ grep -i "sendRichMessage\|systemPlain\|Plain-text fallback\|transient send" node
 ```
 **Diagnosis:** Rich Messages (Bot API 10.1) are **default ON**, controlled by the Telegram-settings **Rich Messages** toggle (`config.richMessages`) with a `SEEKERCLAW_RICH` env-var override (precedence: toggle > env > default ON). With it OFF, every reply uses the classic `parse_mode:HTML` pipeline — this is normal. With it ON (the default), a reply falls back to classic when `sendRichMessage` does not land:
 - `sendRichMessage unsupported by this Bot API ...` — the API does not expose Rich Messages; Rich is disabled for the rest of the run and all replies use the classic pipeline. Nothing is lost.
-- `sendRichMessage failed (fallback/transient: ...) — falling back to classic HTML` — a single rich send was rejected (malformed rich markdown, 429 rate limit, or 5xx); the classic pipeline delivers it instead (not a duplicate — the rich send did not land).
+- `sendRichMessage failed (fallback/transient: ...) — falling back to classic HTML` — a deterministic formatting rejection allows classic fallback. 429/5xx instead produce `Telegram transient send failure — no immediate fallback`; they are not followed by a second visible POST.
 - `sendRichMessage transport error (possibly delivered; no classic fallback)` — the connection dropped after the request was sent, so the message MAY already be delivered; it is NOT resent (NO-DOUBLE-DELIVERY). If a reply seems missing, ask the user to confirm rather than blindly resending.
-**Fix:** No action for the unsupported/fallback cases — delivery still happens via the classic path. For repeated transient failures see "Telegram Rate Limited (429)" above. To turn Rich off entirely, switch off **Rich Messages** in Telegram settings (or set `SEEKERCLAW_RICH`/`richMessages` to `false`) and restart the service.
+**Fix:** No action for the unsupported/fallback cases — delivery still happens via the classic path. For repeated transient failures see "Telegram Rate Limited (429)" above. The **Rich Messages** switch in Settings → Channel → Telegram applies live to subsequent replies without restarting. The Channel screen must not show a restart dialog for this toggle. Environment defaults are startup settings; edit the live toggle for immediate changes.
 
 ### System Notices Render Plain Even With Rich On (expected)
 **Symptoms:** Heartbeat alerts, "Back online", status/thinking bubbles, and auto-resume notices appear as plain text although Rich is enabled.
