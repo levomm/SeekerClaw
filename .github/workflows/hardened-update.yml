@@ -4,109 +4,140 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      validate_only:
+        description: Run all offline CI and both JVM suites without building an APK
+        type: boolean
+        default: false
   schedule:
     - cron: '17 3 */5 * *'
 
 jobs:
   hardened-update:
     runs-on: ubuntu-latest
+    env:
+      HARDENED_PACKAGE: com.seekerclaw.app.contextlitehardened2
+      HARDENED_VERSION_NAME: '2.3.5'
+      HARDENED_VERSION_CODE: '29'
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      - uses: actions/setup-java@v4
         with:
           java-version: '17'
-          distribution: 'temurin'
+          distribution: temurin
+      - uses: gradle/actions/setup-gradle@v4
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+      - name: All offline CI Node tests and smoke
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, subprocess
+          text = pathlib.Path('.github/workflows/build.yml').read_text()
+          block = re.search(r'for t in \\\n(.*?)\n          do', text, re.S).group(1)
+          names = ['tool-schemas'] + [s.strip().rstrip('\\').strip() for s in block.splitlines()]
+          names += ['interim-delivery', 'agent-preferences', 'telegram-commands']
+          for name in names:
+              subprocess.run(['node', 'tests/nodejs-project/' + name + '.test.js'], check=True)
+          subprocess.run(['node', 'tests/nodejs-project/smoke.js'], check=True)
+          PY
+
+      - name: Both Android JVM suites (no APK assembly)
+        run: ./gradlew testDappStoreDebugUnitTest testGooglePlayDebugUnitTest
 
       - name: Restore persistent Hardened signing key
+        if: ${{ !inputs.validate_only }}
         id: signing-cache
         uses: actions/cache@v4
         with:
           path: .signing/hardened.jks
           key: seekerclaw-hardened-signing-v1
 
-      - name: Require existing Hardened signing key for in-place updates
-        if: steps.signing-cache.outputs.cache-hit != 'true'
-        shell: bash
+      - name: Require existing key (never replace installed signing identity)
+        if: ${{ !inputs.validate_only && steps.signing-cache.outputs.cache-hit != 'true' }}
         run: |
-          echo 'Persistent Hardened signing key is missing. Refusing to generate a replacement key: it would not update the installed app.' >&2
+          echo 'Persistent signing key missing; refusing to generate a replacement.' >&2
           exit 1
 
-      - name: Node regression and smoke tests
+      - name: Prepare same-package Hardened update
+        if: ${{ !inputs.validate_only }}
         run: |
-          node tests/nodejs-project/bridge-health-regression.test.js
-          node tests/nodejs-project/tool-schemas.test.js
-          node tests/nodejs-project/smoke.js
-
-      - name: Prepare Hardened 2.3.4 parallel variant
-        shell: bash
-        run: |
-          set -euo pipefail
-          sed -i 's/val appVersionName = "2.3.1"/val appVersionName = "2.3.4"/' app/build.gradle.kts
-          sed -i 's/val appVersionCode = 25/val appVersionCode = 28/' app/build.gradle.kts
-          sed -i 's/applicationId = "com.seekerclaw.app"/applicationId = "com.seekerclaw.app.contextlitehardened2"/' app/build.gradle.kts
-          sed -i 's#<string name="app_name">SeekerClaw</string>#<string name="app_name">SeekerClaw Hardened 2</string>#' app/src/main/res/values/strings.xml
           python3 - <<'PY'
+          import os, re
           from pathlib import Path
           p = Path('app/build.gradle.kts')
           s = p.read_text()
-          needle = '    buildTypes {\n        release {'
-          repl = '    buildTypes {\n        debug {\n            signingConfig = signingConfigs.getByName("dappStore")\n        }\n        release {'
-          if needle not in s:
-              raise SystemExit('buildTypes anchor not found')
-          p.write_text(s.replace(needle, repl, 1))
+          changes = [
+              (r'val appVersionName = "[^"]+"', 'val appVersionName = "' + os.environ['HARDENED_VERSION_NAME'] + '"'),
+              (r'val appVersionCode = \d+', 'val appVersionCode = ' + os.environ['HARDENED_VERSION_CODE']),
+              (r'applicationId = "com.seekerclaw.app"', 'applicationId = "' + os.environ['HARDENED_PACKAGE'] + '"'),
+          ]
+          for pattern, replacement in changes:
+              s, count = re.subn(pattern, replacement, s)
+              if count != 1: raise SystemExit('Unexpected build identity anchor count')
+          anchor = '    buildTypes {\n        release {'
+          if s.count(anchor) != 1: raise SystemExit('Unexpected buildTypes anchor')
+          s = s.replace(anchor, '    buildTypes {\n        debug {\n            signingConfig = signingConfigs.getByName("dappStore")\n        }\n        release {', 1)
+          p.write_text(s)
+          p = Path('app/src/main/res/values/strings.xml')
+          s = p.read_text()
+          anchor = '<string name="app_name">SeekerClaw</string>'
+          if s.count(anchor) != 1: raise SystemExit('Unexpected app label anchor')
+          p.write_text(s.replace(anchor, '<string name="app_name">SeekerClaw Hardened 2</string>', 1))
           PY
-          grep -F 'val appVersionName = "2.3.4"' app/build.gradle.kts
-          grep -F 'val appVersionCode = 28' app/build.gradle.kts
-          grep -F 'applicationId = "com.seekerclaw.app.contextlitehardened2"' app/build.gradle.kts
-          grep -F 'signingConfig = signingConfigs.getByName("dappStore")' app/build.gradle.kts
 
-      - name: JVM tests and Hardened APK build
-        run: ./gradlew testDappStoreDebugUnitTest assembleDappStoreDebug
+      - name: Build only after all tests pass
+        if: ${{ !inputs.validate_only }}
+        run: ./gradlew assembleDappStoreDebug
         env:
           SEEKERCLAW_KEYSTORE_PATH: ${{ github.workspace }}/.signing/hardened.jks
           SEEKERCLAW_STORE_PASSWORD: seekerclaw-hardened-v1
           SEEKERCLAW_KEY_ALIAS: hardened
           SEEKERCLAW_KEY_PASSWORD: seekerclaw-hardened-v1
 
-      - name: Verify APK identity and signature
-        shell: bash
+      - name: Verify package, greater versionCode, certificate and exact commit
+        if: ${{ !inputs.validate_only }}
         run: |
           set -euo pipefail
           APK=app/build/outputs/apk/dappStore/debug/app-dappStore-debug.apk
-          BT=$(ls ${ANDROID_HOME}/build-tools/ | sort -V | tail -1)
-          AAPT=${ANDROID_HOME}/build-tools/${BT}/aapt
-          APKSIGNER=${ANDROID_HOME}/build-tools/${BT}/apksigner
-          "$AAPT" dump badging "$APK" | head -1 | grep -F "package: name='com.seekerclaw.app.contextlitehardened2' versionCode='28' versionName='2.3.4'"
-          "$APKSIGNER" verify --print-certs "$APK"
+          BT=$(ls "${ANDROID_HOME}/build-tools/" | sort -V | tail -1)
+          "${ANDROID_HOME}/build-tools/${BT}/aapt" dump badging "$APK" > apk-badging.txt
+          grep -F "package: name='${HARDENED_PACKAGE}' versionCode='${HARDENED_VERSION_CODE}' versionName='${HARDENED_VERSION_NAME}'" apk-badging.txt
+          test "${HARDENED_VERSION_CODE}" -gt 28
+          "${ANDROID_HOME}/build-tools/${BT}/apksigner" verify --print-certs "$APK" > apk-certificate.txt
+          grep -F 'certificate SHA-256 digest: 8c9bb3754a1c1558c572e7e0d8b3b971cc5f2234f85c7e61e7e43423188b9c5e' apk-certificate.txt
           python3 - "$APK" <<'PY'
           import json, os, sys, zipfile
           with zipfile.ZipFile(sys.argv[1]) as apk:
-              metadata = json.loads(apk.read('assets/build-metadata.json'))
-          if metadata.get('commit') != os.environ['GITHUB_SHA']:
-              raise SystemExit('APK commit does not match requested workflow commit')
-          print('Verified packaged commit:', metadata['commit'])
+              m = json.loads(apk.read('assets/build-metadata.json'))
+          assert m['commit'] == os.environ['GITHUB_SHA'], 'Wrong packaged commit'
+          assert int(m['versionCode']) == int(os.environ['HARDENED_VERSION_CODE'])
+          assert m['versionName'] == os.environ['HARDENED_VERSION_NAME']
           PY
 
-      - name: Collect APK
-        shell: bash
+      - name: Collect verified update (never install)
+        if: ${{ !inputs.validate_only }}
         run: |
-          set -euo pipefail
           mkdir -p hardened-out
-          cp app/build/outputs/apk/dappStore/debug/app-dappStore-debug.apk hardened-out/SeekerClaw-Hardened-2.3.4-Parallel.apk
-          (cd hardened-out && sha256sum SeekerClaw-Hardened-2.3.4-Parallel.apk > SHA256SUMS)
-          printf 'commit=%s\npackage=com.seekerclaw.app.contextlitehardened2\nversionCode=28\nversionName=2.3.4\n' "$GITHUB_SHA" > hardened-out/APK-INFO.txt
-          BT=$(ls ${ANDROID_HOME}/build-tools/ | sort -V | tail -1)
-          "${ANDROID_HOME}/build-tools/${BT}/apksigner" verify --print-certs hardened-out/SeekerClaw-Hardened-2.3.4-Parallel.apk >> hardened-out/APK-INFO.txt
+          cp app/build/outputs/apk/dappStore/debug/app-dappStore-debug.apk hardened-out/SeekerClaw-Hardened2-update.apk
+          cp apk-certificate.txt hardened-out/APK-CERTIFICATE.txt
+          cp apk-badging.txt hardened-out/APK-BADGING.txt
+          printf 'commit=%s\npackage=%s\nversionCode=%s\nversionName=%s\n' "$GITHUB_SHA" "$HARDENED_PACKAGE" "$HARDENED_VERSION_CODE" "$HARDENED_VERSION_NAME" > hardened-out/APK-INFO.txt
+          (cd hardened-out && sha256sum SeekerClaw-Hardened2-update.apk > SHA256SUMS)
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
+        if: ${{ !inputs.validate_only }}
         with:
-          name: seekerclaw-hardened-2.3.4-parallel
+          name: seekerclaw-hardened2-update
           path: hardened-out/
           retention-days: 30
+
+      - name: JVM reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hardened-jvm-test-results
+          path: app/build/test-results/test*UnitTest/*.xml
+          if-no-files-found: ignore
+          retention-days: 7

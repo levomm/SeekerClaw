@@ -209,6 +209,8 @@ SeekerClaw is an Android app built for the Solana Seeker phone (also works on an
 
 ## Features — In Progress
 
+- **osZ delivery/runtime-settings fix (`fix/osz-delivery-runtime-settings`)**: durable app-private interactive answer outbox, truthful acknowledgement and explicit `/outbox` recovery (no automatic ambiguous replay), live Rich/heartbeat/step settings with last-valid retention, atomic Android settings publication and per-search conversational key refresh. PR #17 follow-up covers all eight Codex findings plus fresh P2s for unreadable-record listing and model-facing path confinement around the app-private outbox (`docs/internal/OSZ-PR17-REVIEW-FIXES.md`); fresh CI/review pending. Earlier code-29 APK remains provisional; not installed or merged. Existing memory, identity, database and device configuration are untouched.
+
 - **PR #15 — AndroidBridge health recovery**: authenticated `/ping` verification, three bounded IO recovery attempts (1s/2s/4s), mutex-protected probe/rebind/verify/status and teardown, truthful RUNNING restoration, durable explicit-STOP guard. Follow-up on `fix/osz-bridge-recovery`: watchdog explicitly distinguishes HEALTHY / BRIDGE_UNAVAILABLE / NODE_UNAVAILABLE / STOPPED, rather than reporting live Node as healthy after Bridge failure. Review/testing in progress; not merged or deployed. Memory, database and configuration are outside the change scope.
 
 ## Features — Planned
@@ -252,6 +254,7 @@ User (Telegram/Discord) <--HTTPS/WSS--> Channel API <--polling/WS--> Node.js Gat
 
 ## Limitations & Known Issues
 
+- **osZ interactive outbox candidate** — preserves tracked answers privately and exposes `/outbox`, but never guarantees exactly-once Telegram delivery after a lost ACK. Ambiguous sends require explicit retrieval; system notices/uploads/untracked background sends and workspace Memory Export are outside this contract. Phone E2E and adoption of the new build/settings remain unverified until the user installs/tests it.
 - **Fixed loopback ports** — base and Hardened variants share 8765/8766. PR #15 bounds bridge retry on a persistent port conflict rather than creating a process-restart loop; it does not enable simultaneous variants or prove the original phone-side failure cause. Device lifecycle/STOP testing remains necessary before deployment.
 - **Node 18 only** — nodejs-mobile doesn't support Node 22+, so `node:sqlite` is unavailable (using SQL.js WASM instead)
 - **No vector embeddings** — Semantic memory search not possible yet (keyword search only)
@@ -311,6 +314,7 @@ User (Telegram/Discord) <--HTTPS/WSS--> Channel API <--polling/WS--> Node.js Gat
 
 | Date | Feature | PR |
 |------|---------|-----|
+| Unreleased | osZ: durable interactive answer outbox with explicit recovery, acknowledgement-aware sends, last-valid live step/heartbeat/Rich settings, atomic Android publication and live conversational search-key refresh. Full offline/JVM gates precede same-package/same-signer code-29 APK assembly; no automatic install or device-data changes. | `fix/osz-delivery-runtime-settings` |
 | 2026-08-31 | Fix: **interrupted tasks resume with the right goal** (BAT-1283) — auto-resume derived the "original request" by scanning history forward, returning the OLDEST retained user message rather than the interrupted task's own; that value was injected as an authoritative system directive. Goal is now resolved with explicit precedence and a provenance marker, read sites fail closed on anything untrusted, and a goal mangled by secret redaction can never be replayed — including via a checkpoint written by an older build. 62 test cases (the suites' own counters), 8/8 mutation guards, device-verified 3/3. | #450 |
 | 2026-08-30 | Feat: **UX polish pass** (BAT-1247) — 42 interface-audit findings across Compose UI **and** the Node logging path (new `log-safe.js` plus `ai.js`/`cron.js`/`main.js`/`mcp-client.js`/`message-handler.js`/`tools/system.js`): shared primitives (one section-header style, one search field, one empty state, one uptime formatter), status indicators with a visible status word rather than color alone, plus a log-share sanitizer that replaces message bodies with a length marker while preserving timestamp/level/source. | #449 |
 | 2026-08-29 | Build: **target Android 16 (API 36)** (BAT-1187) — required by Google Play for updates from 31 Aug 2026. Zero dependency changes; the deferring comment had the dependency arrow backwards (androidx.core 1.17 requires compileSdk 36, not the reverse). Also pins `ndkVersion` and 16 KB-aligns our JNI shim via explicit linker flags. `libnode.so` remains out of scope — that is the separate Feb 2027 gate. | #448 |

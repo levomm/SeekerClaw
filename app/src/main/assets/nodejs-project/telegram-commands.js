@@ -34,6 +34,7 @@ const COMMAND_REGISTRY = [
     { name: 'new',      description: 'Archive session & start fresh',  fallback: true },
     { name: 'reset',    description: 'Wipe conversation (no backup)' },
     { name: 'resume',   description: 'Resume an interrupted task' },
+    { name: 'outbox',   description: 'Recover saved unconfirmed responses' },
     { name: 'skill',    description: 'List skills or run one by name', fallback: true },
     { name: 'soul',     description: 'View SOUL.md' },
     { name: 'memory',   description: 'View MEMORY.md' },

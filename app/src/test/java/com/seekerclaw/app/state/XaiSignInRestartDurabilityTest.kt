@@ -55,7 +55,10 @@ class XaiSignInRestartDurabilityTest {
         // Fake internal-control-server on 127.0.0.1:8766 (same socket approach as LeaseRenewalTest).
         // It records each request body and answers 200 fast; the client can't parse the stubbed
         // JSON, but these tests assert on what was REQUESTED, not on the parsed response.
-        server = ServerSocket(8766, 16, InetAddress.getByName("127.0.0.1"))
+        server = ServerSocket().apply {
+            reuseAddress = true
+            bind(java.net.InetSocketAddress(InetAddress.getByName("127.0.0.1"), 8766), 16)
+        }
         acceptThread = Thread {
             try {
                 while (!server.isClosed) {
@@ -71,6 +74,7 @@ class XaiSignInRestartDurabilityTest {
         ServiceState.setBridgeTokenForTest(null)
         XaiOAuthTokenStore.resetForTest()
         runCatching { server.close() }
+        if (::acceptThread.isInitialized) acceptThread.join(1000)
         workDir.deleteRecursively()
     }
 

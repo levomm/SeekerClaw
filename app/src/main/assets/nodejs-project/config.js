@@ -672,6 +672,9 @@ const API_TIMEOUT_MAX_BACKOFF_MS = Math.max(1000, _safeInt(config.apiTimeoutMaxB
 // default-ON is safe even where the Bot API method is unavailable.
 const _boolFlag = (v) => v === true || v === 'true' || v === '1';
 const RICH_MESSAGES_ENABLED = _boolFlag(config.richMessages ?? process.env.SEEKERCLAW_RICH ?? true);
+const runtimeSettings = require('./runtime-settings').createRuntimeSettings(
+    workDir, { ...config, richMessages: RICH_MESSAGES_ENABLED }, log);
+runtimeSettings.read();
 // Bot API feature level this build targets (Rich Messages = Bot API 10.1).
 // Tracked so diagnostics / the tg-bot-api-parity check can report what we
 // build against; not a wire-protocol version (we call api.telegram.org raw).
@@ -1014,25 +1017,35 @@ function serviceToConfigField(service) {
     return `${normalized}ApiKey`;
 }
 
+const _conversationalKeys = new Map();
 function syncAgentApiKeys() {
     try {
         const settingsPath = path.join(workDir, 'agent_settings.json');
         if (!fs.existsSync(settingsPath)) return;
         const s = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-        if (!s.apiKeys || typeof s.apiKeys !== 'object') return;
-        // Dynamic: load ALL keys from apiKeys.*, not just known ones
-        for (const [service, agentKey] of Object.entries(s.apiKeys)) {
-            const configField = serviceToConfigField(service);
-            if (!configField) continue;
-            // Android Settings keys always win — don't overwrite
-            if (_androidKeys[configField]) continue;
-            if (agentKey && typeof agentKey === 'string' && agentKey.trim() && agentKey.length <= 512) {
+        if (!s || typeof s !== 'object' || Array.isArray(s)) return;
+        const apiKeys = s.apiKeys ?? {};
+        if (typeof apiKeys !== 'object' || Array.isArray(apiKeys)) return;
+        const next = new Map();
+        for (const [service, agentKey] of Object.entries(apiKeys)) {
+            const field = serviceToConfigField(service);
+            if (!field || _androidKeys[field]) continue;
+            if (typeof agentKey === 'string' && agentKey.trim() && agentKey.length <= 512) {
                 const normalized = normalizeSecret(agentKey);
-                if (normalized && config[configField] !== normalized) {
-                    config[configField] = normalized;
-                    // Log configField (sanitized) instead of raw service name to prevent log injection
-                    log(`[Config] Loaded API key → config.${configField} from agent_settings.json`, 'INFO');
-                }
+                if (normalized) next.set(field, normalized);
+            }
+        }
+        // Revoke only values this reader installed; never erase Android/other owners.
+        // Missing/bad files keep the prior snapshot; a valid removal/blank revokes it.
+        for (const [field, previous] of _conversationalKeys) {
+            if (!next.has(field) && !_androidKeys[field] && config[field] === previous) delete config[field];
+        }
+        _conversationalKeys.clear();
+        for (const [field, normalized] of next) {
+            _conversationalKeys.set(field, normalized);
+            if (config[field] !== normalized) {
+                config[field] = normalized;
+                log(`[Config] Loaded API key → config.${field} from agent_settings.json`, 'INFO');
             }
         }
     } catch (_) {}
@@ -1156,6 +1169,7 @@ module.exports = {
 
     // BAT-1050: Telegram Rich Messages (Bot API 10.1) — DEFAULT-ON flag (config.richMessages > SEEKERCLAW_RICH > true)
     RICH_MESSAGES_ENABLED,
+    runtimeSettings,
     BOT_API_VERSION,
 
     // Conversational API keys (BAT-236)

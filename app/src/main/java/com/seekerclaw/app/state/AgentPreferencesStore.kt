@@ -281,6 +281,22 @@ object AgentPreferencesStore {
         return ok
     }
 
+    /** Restore only a trusted pre-write image captured by ConfigManager's failed transaction.
+     * Existing migrated long names must survive rollback, not be rejected as a new edit.
+     */
+    internal fun restoreSnapshot(value: AgentPreferences): Boolean {
+        val s = store ?: return false
+        validateRollbackSnapshot(value)
+        val ok = s.write(value)
+        if (ok) _state.value = value
+        return ok
+    }
+
+    internal fun validateRollbackSnapshot(value: AgentPreferences) {
+        require(value.searchProvider in AgentPreferences.KNOWN_SEARCH_PROVIDERS)
+        require(value.agentName.isNotBlank())
+    }
+
     /**
      * Read-modify-write under the underlying [CrossProcessStore]'s
      * `synchronized(writeLock)` block — atomic w.r.t. both concurrent

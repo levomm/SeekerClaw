@@ -396,6 +396,24 @@ object ConfigManager {
         // process sync, so partial commit is the same as today's
         // pre-BAT-513 behaviour).
         val sp = prefs(context)
+        val preSavePrefs = sp.all.toMap()
+        fun restoreSavedPrefs(): Boolean {
+            val restore = sp.edit()
+            for (key in sp.all.keys - preSavePrefs.keys) restore.remove(key)
+            for ((key, value) in preSavePrefs) {
+                when (value) {
+                    is String -> restore.putString(key, value)
+                    is Boolean -> restore.putBoolean(key, value)
+                    is Int -> restore.putInt(key, value)
+                    is Long -> restore.putLong(key, value)
+                    is Float -> restore.putFloat(key, value)
+                    is Set<*> -> restore.putStringSet(key, value.filterIsInstance<String>().toSet())
+                    null -> restore.remove(key)
+                    else -> error("Unsupported preference type")
+                }
+            }
+            return restore.commit()
+        }
         val oldProvider = sp.getString(KEY_PROVIDER, null)
         val oldAuthType = sp.getString(KEY_AUTH_TYPE, null)
         val oldModel = sp.getString(KEY_MODEL, null)
@@ -632,7 +650,9 @@ object ConfigManager {
 
         val persisted = editor.commit()
         if (!persisted) {
-            LogCollector.append("[Config] Failed to persist config (commit=false)", LogLevel.ERROR)
+            val restored = runCatching { restoreSavedPrefs() }.getOrDefault(false)
+            bumpConfigVersionOnMain()
+            LogCollector.append("[Config] Failed to persist config (commit=false, restored=$restored)", LogLevel.ERROR)
             return false
         }
         bumpConfigVersionOnMain()
@@ -793,31 +813,8 @@ object ConfigManager {
             // skip Setup on next launch, leaving the user stranded
             // with an unconfigured agent. For existing users (snapshot
             // already true), the rollback is a no-op.
-            val rollback = sp.edit()
-            if (oldProvider != null) rollback.putString(KEY_PROVIDER, oldProvider)
-            else rollback.remove(KEY_PROVIDER)
-            if (oldAuthType != null) rollback.putString(KEY_AUTH_TYPE, oldAuthType)
-            else rollback.remove(KEY_AUTH_TYPE)
-            if (oldModel != null) rollback.putString(KEY_MODEL, oldModel)
-            else rollback.remove(KEY_MODEL)
-            // R5 Copilot: BAT-515 added KEY_AGENT_NAME / KEY_SEARCH_PROVIDER
-            // to the same `editor.commit()` block above (lines 367, 389).
-            // The pre-BAT-515 rollback only covered the BAT-513 runtime
-            // keys, so a RuntimeStateStore failure left prefs holding the
-            // NEW agentName/searchProvider while runtime_state.json kept
-            // the OLD values — and agent_preferences.json (which the
-            // saveConfig flow hasn't reached yet at this point) also has
-            // the old values. Without these two extra rollback lines,
-            // prefs and the cross-process files would diverge on the
-            // RuntimeStateStore-failure path, undoing the v3 §4 atomicity
-            // contract. Mirror the same put-or-remove shape the later
-            // AgentPreferencesStore-failure rollback already uses.
-            if (oldAgentName != null) rollback.putString(KEY_AGENT_NAME, oldAgentName)
-            else rollback.remove(KEY_AGENT_NAME)
-            if (oldSearchProvider != null) rollback.putString(KEY_SEARCH_PROVIDER, oldSearchProvider)
-            else rollback.remove(KEY_SEARCH_PROVIDER)
-            rollback.putBoolean(KEY_SETUP_COMPLETE, oldSetupComplete)
-            val rollbackOk = rollback.commit()
+            // Full snapshot includes steps, heartbeat, Rich and encrypted fields too.
+            val rollbackOk = restoreSavedPrefs()
             if (!rollbackOk) {
                 // Synchronous commit failed (rare — usually means the
                 // disk is genuinely full). Log loudly; the partial
@@ -870,9 +867,11 @@ object ConfigManager {
         // pre-validation and this update {}'s writeLock — making the
         // (next, current-inside-lock) pair newly-invalid. Rare, but
         // the rollback path keeps things atomic if it happens.
+        var preForwardAgentPrefs: AgentPreferences? = null
         val agentPrefsWritten = if (AgentPreferencesStore.isInitialized) try {
             kotlinx.coroutines.runBlocking(kotlinx.coroutines.Dispatchers.IO) {
                 AgentPreferencesStore.update { current ->
+                    preForwardAgentPrefs = current
                     current.copy(
                         searchProvider = config.searchProvider,
                         agentName = config.agentName,
@@ -906,19 +905,7 @@ object ConfigManager {
             // intentional rollback semantic. /think writes are
             // tolerable to lose under this rare path; preferring user-
             // intent atomicity over inter-update concurrent retention.
-            val rollback = sp.edit()
-            if (oldProvider != null) rollback.putString(KEY_PROVIDER, oldProvider)
-            else rollback.remove(KEY_PROVIDER)
-            if (oldAuthType != null) rollback.putString(KEY_AUTH_TYPE, oldAuthType)
-            else rollback.remove(KEY_AUTH_TYPE)
-            if (oldModel != null) rollback.putString(KEY_MODEL, oldModel)
-            else rollback.remove(KEY_MODEL)
-            if (oldAgentName != null) rollback.putString(KEY_AGENT_NAME, oldAgentName)
-            else rollback.remove(KEY_AGENT_NAME)
-            if (oldSearchProvider != null) rollback.putString(KEY_SEARCH_PROVIDER, oldSearchProvider)
-            else rollback.remove(KEY_SEARCH_PROVIDER)
-            rollback.putBoolean(KEY_SETUP_COMPLETE, oldSetupComplete)
-            val rollbackOk = rollback.commit()
+            val rollbackOk = restoreSavedPrefs()
             if (!rollbackOk) {
                 LogCollector.append(
                     "[Config] Rollback commit() returned false — prefs may be in inconsistent state " +
@@ -958,6 +945,37 @@ object ConfigManager {
             return false
         }
 
+        // The last publication is fallible too. Restore ALL preference fields
+        // (not only provider/model), including steps/heartbeat/Rich, and both
+        // cross-process preimages if the atomic overlay cannot be committed.
+        val publication = SettingsPublication.finish(
+            publish = { writeAgentSettingsJson(context, configOverride = config) },
+            restorePrefs = { restoreSavedPrefs() },
+            restoreRuntime = {
+                if (RuntimeStateStore.isInitialized && preForwardRuntime != null) {
+                    kotlinx.coroutines.runBlocking(kotlinx.coroutines.Dispatchers.IO) {
+                        RuntimeStateStore.update { _ -> preForwardRuntime!! }
+                    }
+                } else true
+            },
+            restoreAgentPrefs = {
+                if (AgentPreferencesStore.isInitialized && preForwardAgentPrefs != null) {
+                    kotlinx.coroutines.runBlocking(kotlinx.coroutines.Dispatchers.IO) {
+                        AgentPreferencesStore.restoreSnapshot(preForwardAgentPrefs!!)
+                    }
+                } else true
+            },
+        )
+        if (!publication.published) {
+            bumpConfigVersionOnMain()
+            LogCollector.append(
+                "[Config] Settings publication failed; rollback prefs=${publication.prefsRestored}, " +
+                    "runtime=${publication.runtimeRestored}, agentPrefs=${publication.agentPrefsRestored}",
+                LogLevel.WARN,
+            )
+            return false
+        }
+
         // R4 Copilot (BAT-549) + BAT-515 v3 §4 step 5: gate the
         // BAT-549 reset-log on BOTH stores succeeding. The
         // `loggedSigReset` flag is set inside the RuntimeStateStore
@@ -991,7 +1009,7 @@ object ConfigManager {
         // configOverride=config: skip the loadConfig round-trip
         // writeAgentSettingsJson would otherwise do, which would
         // re-trigger reconcile (PR #339 device-test regression fix).
-        writeAgentSettingsJson(context, configOverride = config)
+        // Publication/rollback completed above; broadcast only on full success.
         // Notify the OTHER process — main-process UI relies on this
         // to refresh after :node-process writes (e.g. /provider
         // Telegram switch's service-start reconcile). Same-process
@@ -2314,37 +2332,38 @@ object ConfigManager {
      *   Settings UI save. Service-start callers omit this param to get
      *   the default reconcile-then-publish behavior.
      */
-    fun writeAgentSettingsJson(context: Context, configOverride: AppConfig? = null) {
-        val config = configOverride ?: loadConfig(context)
-        if (config == null) {
-            LogCollector.append("[Config] writeAgentSettingsJson: loadConfig returned null; skipping write", LogLevel.WARN)
-            return
-        }
+    fun writeAgentSettingsJson(context: Context, configOverride: AppConfig? = null): Boolean {
+        val config = configOverride ?: loadConfig(context) ?: return false
         val workspaceDir = File(context.filesDir, "workspace").apply { mkdirs() }
         val settingsFile = File(workspaceDir, "agent_settings.json")
-        try {
-            // Read existing file to preserve agent-written fields (e.g. apiKeys)
-            val existing = if (settingsFile.exists()) {
-                try { JSONObject(settingsFile.readText()) } catch (_: Exception) { JSONObject() }
-            } else {
-                JSONObject()
+        return try {
+            java.io.RandomAccessFile(File(workspaceDir, "agent_settings.lock"), "rw").use { lockFile ->
+                lockFile.channel.lock().use {
+                    val atomic = android.util.AtomicFile(settingsFile)
+                    // Never replace unreadable existing data with an empty object (could lose apiKeys).
+                    val existing = if (settingsFile.exists()) JSONObject(String(atomic.readFully(), Charsets.UTF_8)) else JSONObject()
+                    existing.put("heartbeatIntervalMinutes", config.heartbeatIntervalMinutes)
+                    existing.put("maxStepsPerTurn", config.maxStepsPerTurn)
+                    existing.put("richMessages", config.richMessages)
+                    existing.put("provider", config.provider)
+                    existing.put("authType", config.authType)
+                    existing.put("model", config.model)
+                    if (!existing.has("apiKeys")) existing.put("apiKeys", JSONObject())
+                    var stream: java.io.FileOutputStream? = null
+                    try {
+                        stream = atomic.startWrite()
+                        stream.write(existing.toString(2).toByteArray(Charsets.UTF_8))
+                        atomic.finishWrite(stream)
+                    } catch (e: Exception) {
+                        atomic.failWrite(stream)
+                        throw e
+                    }
+                }
             }
-            // Android-managed fields always overwrite. The provider/authType/model
-            // triple is included so Node-initiated changes (via /model or /provider
-            // Telegram commands) have a single consistent source of truth, and a
-            // Settings UI save here publishes the canonical values.
-            existing.put("heartbeatIntervalMinutes", config.heartbeatIntervalMinutes)
-            existing.put("maxStepsPerTurn", config.maxStepsPerTurn)
-            existing.put("provider", config.provider)
-            existing.put("authType", config.authType)
-            existing.put("model", config.model)
-            // Ensure apiKeys object exists (agent writes individual keys into it)
-            if (!existing.has("apiKeys")) {
-                existing.put("apiKeys", JSONObject())
-            }
-            settingsFile.writeText(existing.toString(2))
-        } catch (e: Exception) {
-            LogCollector.append("[Config] Failed to write agent_settings.json: ${e.message}", LogLevel.WARN)
+            true
+        } catch (_: Exception) {
+            LogCollector.append("[Config] Failed to publish agent_settings.json; previous file preserved", LogLevel.WARN)
+            false
         }
     }
 

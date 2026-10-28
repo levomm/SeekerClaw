@@ -7,7 +7,60 @@ const fs = require('fs');
 const https = require('https');
 const path = require('path');
 
-const { BOT_TOKEN, log, workDir, getOwnerId, RICH_MESSAGES_ENABLED } = require('./config');
+const { BOT_TOKEN, log, workDir, getOwnerId, RICH_MESSAGES_ENABLED, runtimeSettings } = require('./config');
+const { DeliveryOutbox, pendingDeliveryError } = require('./delivery-outbox');
+let outbox;
+let nextOutboxSweepAt = 0;
+function getOutbox() {
+    // Numeric bot identity survives token rotation; no token is written to disk.
+    const token = String(BOT_TOKEN || '');
+    const botId = /^\d+:/.test(token) ? token.split(':')[0] : token;
+    const namespace = crypto.createHash('sha256').update(botId).digest('hex').slice(0, 32);
+    const root = path.join(path.dirname(workDir), 'delivery-outbox');
+    outbox ||= new DeliveryOutbox(path.join(root, namespace), namespace);
+    const now = Date.now();
+    if (now >= nextOutboxSweepAt) {
+        nextOutboxSweepAt = now + 60000;
+        // A bot switch must not leave expired ACKs in the inactive bot's folder.
+        // Every sweep still uses the same strict ACK-only preservation checks.
+        try {
+            for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+                if (entry.isDirectory() && /^[a-f0-9]{32}$/.test(entry.name)) {
+                    new DeliveryOutbox(path.join(root, entry.name), entry.name).prune(now);
+                }
+            }
+        } catch (_) { /* best-effort housekeeping, never mask pending delivery */ }
+    }
+    return outbox;
+}
+function outboxCommand(chatId, args = []) {
+    if (typeof args === 'string') args = args.trim().split(/\s+/).filter(Boolean);
+    if (!args.length) {
+        const store = getOutbox(), pending = store.list(chatId).slice(0, 10);
+        const warning = store.unreadableCount ? '\nSome saved records are unreadable and were preserved; readable responses remain available.' : '';
+        return (pending.length ? 'Saved responses (not automatically resent):\n' + pending.map(r => `${r.id}: ${r.state}`).join('\n') +
+            '\nUse /outbox show <id> to explicitly retrieve one. An uncertain original may already be visible.' : 'No readable pending saved responses.') + warning;
+    }
+    if (args.length !== 2 || args[0] !== 'show' || !/^[a-f0-9]{32}$/.test(args[1] || '')) return 'Usage: /outbox or /outbox show <id>. No automatic resend.';
+    let record;
+    try { record = getOutbox().read(args[1]); } catch (_) { return 'Saved response not available.'; }
+    if (record.chatId !== String(chatId)) return 'Saved response not available.';
+    if (record.state === 'acknowledged') return 'Already acknowledged by Telegram; saved text has been cleared. Check the original chat message.';
+    return 'Saved response requested by you (the original delivery may be uncertain):\n\n' + record.text;
+}
+function prepareMessage(chatId, text, replyTo, buttons, opts = {}) {
+    if (!opts.deliveryKey) return null;
+    const cleaned = redactSecrets(cleanResponse(text));
+    if (!cleaned) return null;
+    return getOutbox().prepare(chatId, cleaned, replyTo, opts.deliveryKey);
+}
+async function trackedTelegram(method, payload, delivery, part) {
+    if (!delivery) return telegram(method, payload);
+    if (_stopped || fs.existsSync(path.join(path.dirname(workDir), 'service_user_stopped')) || require('./quiesce').isQuiesced()) {
+        const e = new Error('Delivery paused'); e.code = 'DELIVERY_PENDING'; throw e;
+    }
+    return getOutbox().attempt(delivery.id, part, () => telegram(method, payload));
+}
 const { redactSecrets } = require('./security');
 const { httpRequest } = require('./http');
 const { sanitizeRichMarkdown } = require('./rich-markdown');
@@ -717,7 +770,8 @@ function chunkMarkdown(text) {
 // second visible send; 'transient'/'uncertain' must NOT produce a duplicate.
 function classifyTelegramOutcome(result, error) {
     if (error) return { verdict: 'uncertain', desc: error.message || String(error) };
-    if (result && result.ok) return { verdict: 'ok', desc: '' };
+    if (!result || typeof result !== 'object' || typeof result.ok !== 'boolean') return { verdict: 'uncertain', desc: 'Unparseable acknowledgement' };
+    if (result.ok) return { verdict: 'ok', desc: '' };
     const desc = (result && result.description) || '';
     const code = result && result.error_code;
     if (desc.includes('too long')) return { verdict: 'too_long', desc };
@@ -744,7 +798,7 @@ let _richMethodAvailable = null;
 //   delivered:true  -> sent OR possibly-delivered (transport error) — caller must
 //                      NOT also send via classic (NO-DOUBLE-DELIVERY).
 async function richTrySend(chatId, text, replyTo, buttons, opts = {}) {
-    if (!RICH_MESSAGES_ENABLED || _richMethodAvailable === false) return { delivered: false };
+    if (!(runtimeSettings ? runtimeSettings.read().richMessages : RICH_MESSAGES_ENABLED) || _richMethodAvailable === false) return { delivered: false };
     // Keep forum-topic delivery deterministic. The classic Bot API documents
     // message_thread_id; the Rich extension may not preserve it consistently.
     if (opts && opts.messageThreadId != null) return { delivered: false };
@@ -764,7 +818,7 @@ async function richTrySend(chatId, text, replyTo, buttons, opts = {}) {
 
     let outcome, result = null;
     try {
-        result = await telegram('sendRichMessage', payload);
+        result = await trackedTelegram('sendRichMessage', payload, opts.delivery, 'rich');
         outcome = classifyTelegramOutcome(result, null);
     } catch (e) {
         outcome = classifyTelegramOutcome(null, e);
@@ -777,19 +831,22 @@ async function richTrySend(chatId, text, replyTo, buttons, opts = {}) {
             recordSentMessage(chatId, mid, text);
             return { delivered: true, ret: { messageId: mid } };
         }
-        return { delivered: true };
+        return { delivered: true, ret: { status: 'uncertain' } };
     }
 
     if (outcome.verdict === 'uncertain') {
         // Transport error after the POST — possibly delivered. NO-DOUBLE-DELIVERY:
         // do NOT fall back to classic (would risk a duplicate).
         log(`sendRichMessage transport error (possibly delivered; no classic fallback): ${outcome.desc}`, 'WARN');
-        return { delivered: true };
+        return { delivered: true, ret: { status: 'uncertain' } };
+    }
+    if (outcome.verdict === 'transient') {
+        return { delivered: true, ret: { status: 'rejected' } };
     }
 
-    // Any other non-delivery (deterministic rejection, 429/5xx, unsupported method)
-    // means Rich did NOT land -> fall back to the classic pipeline (not a
-    // duplicate). If the method itself is unsupported, stop probing this run.
+    // Only deterministic rejection/unsupported method reaches classic fallback.
+    // Transport uncertainty and 429/5xx have already returned without a second POST.
+    // If the method itself is unsupported, stop probing this run.
     const desc = (outcome.desc || '').toLowerCase();
     // Only disable Rich for an actual unsupported-method signal — NOT a generic
     // "not found" (which also matches target errors like "chat not found" /
@@ -804,6 +861,25 @@ async function richTrySend(chatId, text, replyTo, buttons, opts = {}) {
 }
 
 async function sendMessage(chatId, text, replyTo = null, buttons = null, opts = {}) {
+    const delivery = prepareMessage(chatId, text, replyTo, buttons, opts);
+    if (!delivery) return sendMessageOnce(chatId, text, replyTo, buttons, opts);
+    return getOutbox().run(delivery.id, async () => {
+        const current = getOutbox().read(delivery.id);
+        if (current.state === 'acknowledged') return { status: current.state, messageId: current.messageId, deliveryId: current.id };
+        if (current.state !== 'ready') return { status: current.state, deliveryId: current.id };
+        if (Object.keys(current.parts).length) {
+            // A crash can leave READY with a confirmed prefix or an in-flight part.
+            // Do not switch rendering plans or replay any prefix after restart.
+            return getOutbox().finish(current.id, { status: 'uncertain' });
+        }
+        try {
+            const result = await sendMessageOnce(chatId, current.text, current.replyTo, buttons, { ...opts, delivery: current });
+            return getOutbox().finish(current.id, result);
+        } catch (cause) { throw pendingDeliveryError(current.id, cause); }
+    });
+}
+
+async function sendMessageOnce(chatId, text, replyTo = null, buttons = null, opts = {}) {
     // Clean AI artifacts before sending to user
     text = cleanResponse(text);
     if (!text) return; // Nothing left after cleaning
@@ -819,7 +895,7 @@ async function sendMessage(chatId, text, replyTo = null, buttons = null, opts = 
         ? opts.messageThreadId : null;
 
     if (opts && opts.plainOnly) {
-        return sendPlainChunks(chatId, text, replyTo, buttons, messageThreadId);
+        return sendPlainChunks(chatId, text, replyTo, buttons, messageThreadId, opts.delivery);
     }
 
     // BAT-1050: try Rich Messages first (flag-gated; ON by default). On any
@@ -827,7 +903,7 @@ async function sendMessage(chatId, text, replyTo = null, buttons = null, opts = 
     // classic chunked HTML pipeline below (the rollout source of truth). A
     // possibly-delivered transport error returns { delivered:true } so we do NOT
     // duplicate it on the classic path.
-    const rich = await richTrySend(chatId, text, replyTo, buttons, { messageThreadId });
+    const rich = await richTrySend(chatId, text, replyTo, buttons, { messageThreadId, delivery: opts.delivery });
     if (rich.delivered) return rich.ret;
 
     // Telegram max message length is 4096 — use markdown-aware chunking
@@ -852,11 +928,13 @@ async function sendMessage(chatId, text, replyTo = null, buttons = null, opts = 
             };
             if (messageThreadId != null) payload.message_thread_id = messageThreadId;
             if (replyMarkup) payload.reply_markup = replyMarkup;
-            const result = await telegram('sendMessage', payload);
+            const result = await trackedTelegram('sendMessage', payload, opts.delivery, `html:${i}`);
             outcome = classifyTelegramOutcome(result, null);
             if (outcome.verdict === 'ok' && result.result && result.result.message_id) {
                 lastMessageId = result.result.message_id;
                 recordSentMessage(chatId, result.result.message_id, chunk);
+            } else if (outcome.verdict === 'ok') {
+                outcome = { verdict: 'uncertain', desc: 'missing message ID' };
             }
         } catch (e) {
             // Transport error (timeout/socket) AFTER the POST — the message may
@@ -884,11 +962,11 @@ async function sendMessage(chatId, text, replyTo = null, buttons = null, opts = 
                 plainFallbackEligible = true;
                 break;
             case 'transient':
-                log(`Telegram transient send failure (${outcome.desc}) — not retrying as plain (avoid duplicate/hammer)`, 'WARN');
-                break;
+                log('Telegram transient send failure — no immediate fallback', 'WARN');
+                return { status: 'rejected', messageId: lastMessageId };
             case 'uncertain':
-                log(`sendMessage HTML transport error (possibly delivered; no plain fallback): ${outcome.desc}`, 'WARN');
-                break;
+                log('sendMessage HTML transport error — delivery unconfirmed', 'WARN');
+                return { status: 'uncertain', messageId: lastMessageId };
             case 'ok':
             default:
                 break;
@@ -903,17 +981,21 @@ async function sendMessage(chatId, text, replyTo = null, buttons = null, opts = 
                 };
                 if (messageThreadId != null) payload.message_thread_id = messageThreadId;
                 if (replyMarkup) payload.reply_markup = replyMarkup;
-                const result = await telegram('sendMessage', payload);
+                const result = await trackedTelegram('sendMessage', payload, opts.delivery, `plain:${i}`);
                 if (result && result.ok && result.result && result.result.message_id) {
                     lastMessageId = result.result.message_id;
                     recordSentMessage(chatId, result.result.message_id, chunk);
                 } else if (result && !result.ok) {
-                    log(`Plain-text fallback rejected: ${result.description || 'unknown error'}`, 'WARN');
+                    log('Plain-text fallback rejected — delivery unconfirmed', 'WARN');
+                    return { status: 'rejected', messageId: lastMessageId };
+                } else {
+                    return { status: 'uncertain', messageId: lastMessageId };
                 }
             } catch (e) {
                 // Plain fallback also hit a transport error — give up for this chunk
                 // (no further retry, to avoid an unbounded send loop / duplicate).
-                log(`Plain-text fallback transport error: ${e.message}`, 'ERROR');
+                log('Plain-text fallback transport error — delivery unconfirmed', 'ERROR');
+                return { status: 'uncertain', messageId: lastMessageId };
             }
         }
     }
@@ -926,7 +1008,7 @@ async function sendMessage(chatId, text, replyTo = null, buttons = null, opts = 
 // transform. Single attempt per chunk (no HTML->plain ladder), so it carries no
 // double-send risk. `text` is already cleanResponse'd + redactSecrets'd by the
 // caller (sendMessage). Used for system/synthetic notices via sendMessageSystem.
-async function sendPlainChunks(chatId, text, replyTo, buttons, messageThreadId = null) {
+async function sendPlainChunks(chatId, text, replyTo, buttons, messageThreadId = null, delivery = null) {
     const chunks = chunkMarkdown(text);
     let lastMessageId = null;
     for (let i = 0; i < chunks.length; i++) {
@@ -937,15 +1019,17 @@ async function sendPlainChunks(chatId, text, replyTo, buttons, messageThreadId =
             const payload = { chat_id: chatId, text: chunk, reply_to_message_id: replyTo };
             if (messageThreadId != null) payload.message_thread_id = messageThreadId;
             if (replyMarkup) payload.reply_markup = replyMarkup;
-            const result = await telegram('sendMessage', payload);
+            const result = await trackedTelegram('sendMessage', payload, delivery, `systemPlain:${i}`);
             if (result && result.ok && result.result && result.result.message_id) {
                 lastMessageId = result.result.message_id;
                 recordSentMessage(chatId, result.result.message_id, chunk);
-            } else if (result && !result.ok) {
-                log(`systemPlain send rejected: ${result.description || 'unknown error'}`, 'WARN');
+            } else {
+                log('systemPlain send not acknowledged', 'WARN');
+                return { status: result?.ok === false ? 'rejected' : 'uncertain', messageId: lastMessageId };
             }
         } catch (e) {
-            log(`systemPlain send failed: ${e.message}`, 'WARN');
+            log('systemPlain send failed — delivery unconfirmed', 'WARN');
+            return { status: 'uncertain', messageId: lastMessageId };
         }
     }
     if (lastMessageId != null) return { messageId: lastMessageId };
@@ -1296,6 +1380,9 @@ module.exports = {
     SENT_CACHE_TTL,
     recordSentMessage,
     sendMessage,
+    prepareMessage,
+    getOutbox,
+    outboxCommand,
     sendMessageSystem,
     richTrySend,
     classifyTelegramOutcome,

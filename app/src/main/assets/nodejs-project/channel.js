@@ -23,7 +23,9 @@ module.exports = {
     init,
     start(onMessage, onReaction) { assertInit(); return impl.start(onMessage, onReaction); },
     stop() { assertInit(); return impl.stop(); },
-    sendMessage(chatId, text, replyTo) { assertInit(); return impl.sendMessage(chatId, text, replyTo); },
+    sendMessage(chatId, text, replyTo, buttons, opts) { assertInit(); return impl.sendMessage(chatId, text, replyTo, buttons, opts); },
+    prepareMessage(...args) { assertInit(); return impl.prepareMessage?.(...args); },
+    outboxCommand(...args) { assertInit(); return impl.outboxCommand?.(...args); },
     // BAT-1050 P1A: channel-agnostic plain/system send — for synthetic/system
     // notices (heartbeat, back-online, status) that must NEVER render Rich.
     // Telegram implements systemPlain (raw, no parse_mode); Discord (no

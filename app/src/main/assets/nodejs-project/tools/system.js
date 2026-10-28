@@ -9,7 +9,7 @@ const {
 } = require('../config');
 
 const {
-    redactSecrets, safePath,
+    redactSecrets, safePath, isWorkspacePath,
 } = require('../security');
 
 // BAT-1087: agent_settings.json holds provider secrets under apiKeys.*. It is NOT in
@@ -23,6 +23,52 @@ const AGENT_SETTINGS_FILE = 'agent_settings.json';
 // `agent_settings.json.bak` is NOT falsely matched (a `\b` after `.json` would).
 // Derived from the constant so shell_exec and js_eval stay in lockstep if renamed.
 const AGENT_SETTINGS_RX = new RegExp('(^|[\\s/])' + AGENT_SETTINGS_FILE.replace(/[.]/g, '\\.') + '(\\s|$)', 'i');
+
+function tokenizeShellLike(cmd) {
+    const out = [];
+    let cur = '', quote = null, esc = false;
+    for (const ch of String(cmd)) {
+        if (esc) { cur += ch; esc = false; continue; }
+        if (ch === '\\') { esc = true; continue; }
+        if (quote) {
+            if (ch === quote) quote = null;
+            else cur += ch;
+            continue;
+        }
+        if (ch === '"' || ch === "'") { quote = ch; continue; }
+        if (/\s/.test(ch)) {
+            if (cur) { out.push(cur); cur = ''; }
+            continue;
+        }
+        cur += ch;
+    }
+    if (esc) cur += '\\';
+    if (cur) out.push(cur);
+    return out;
+}
+
+function pathTokenEscapesWorkspace(token, cwd) {
+    if (!token || token === '-') return false;
+    const scheme = token.match(/^([a-z][a-z0-9+.-]*):\/\//i);
+    if (scheme) {
+        // curl is allowlisted for network diagnostics/fetches, not local file reads.
+        // Treat file:// and every non-HTTP scheme as an unsafe path reference.
+        return !/^https?$/i.test(scheme[1]);
+    }
+    const looksLikePath = token === '.' || token === '..' || token.startsWith('./') || token.startsWith('../') ||
+        token.startsWith('/') || token.includes('/..') || token.includes('../') || token.includes('/');
+    if (!looksLikePath) return false;
+    const candidate = path.isAbsolute(token) ? token : path.resolve(cwd, token);
+    return !isWorkspacePath(candidate);
+}
+
+function shellArgsStayInWorkspace(cmd, cwd) {
+    const tokens = tokenizeShellLike(cmd).slice(1);
+    for (const token of tokens) {
+        if (pathTokenEscapesWorkspace(token, cwd)) return false;
+    }
+    return true;
+}
 
 // DeerFlow P2: Tool registry for tool_search — set from tools/index.js at startup
 let _getTools = null;
@@ -176,6 +222,10 @@ const handlers = {
             cwd = resolved;
         }
 
+        if (!shellArgsStayInWorkspace(cmd, cwd)) {
+            return { error: 'Access denied: shell path outside workspace' };
+        }
+
         // Validate and clamp timeout to [1, 30000]ms
         let timeout = 30000;
         if (input.timeout_ms !== undefined) {
@@ -292,8 +342,37 @@ const handlers = {
 
         // Sandboxed require: block dangerous modules and restrict fs access to sensitive files
         const BLOCKED_MODULES = new Set(['child_process', 'cluster', 'worker_threads', 'vm', 'v8', 'perf_hooks', 'module']);
-        // Create a guarded fs proxy that blocks reads AND writes to sensitive files
-        // promisesGuard: optional set of guarded methods for the .promises sub-property
+        const FS_PATH_ARG_COUNT = new Map(Object.entries({
+            accessSync: 1, access: 1, existsSync: 1,
+            statSync: 1, stat: 1, lstatSync: 1, lstat: 1, realpathSync: 1, realpath: 1,
+            readdirSync: 1, readdir: 1, opendirSync: 1, opendir: 1, readlinkSync: 1, readlink: 1,
+            readFileSync: 1, readFile: 1, createReadStream: 1, openSync: 1, open: 1,
+            writeFileSync: 1, writeFile: 1, appendFileSync: 1, appendFile: 1, createWriteStream: 1,
+            mkdirSync: 1, mkdir: 1, rmSync: 1, rm: 1, rmdirSync: 1, rmdir: 1, unlinkSync: 1, unlink: 1,
+            chmodSync: 1, chmod: 1, chownSync: 1, chown: 1, utimesSync: 1, utimes: 1, truncateSync: 1, truncate: 1,
+            copyFileSync: 2, copyFile: 2, cpSync: 2, cp: 2, renameSync: 2, rename: 2,
+            symlinkSync: 2, symlink: 2, linkSync: 2, link: 2,
+        }));
+        function guardFsPath(rawPath) {
+            const filePath = String(rawPath);
+            const resolved = path.isAbsolute(filePath) ? filePath : path.resolve(workDir, filePath);
+            const safe = safePath(path.relative(workDir, resolved));
+            if (!safe) throw new Error('Access outside workspace is blocked.');
+            const basename = path.basename(safe);
+            if (SECRETS_BLOCKED.has(basename)) {
+                throw new Error(`Access to ${basename} is blocked for security.`);
+            }
+            // BAT-1087: agent_settings.json isn't in SECRETS_BLOCKED (masked
+            // read is allowed via the read tool), but js_eval must not read it
+            // raw — that would bypass masking for <7-char / corrupt-file secrets.
+            if (basename === AGENT_SETTINGS_FILE) {
+                throw new Error('Access to agent_settings.json via js_eval is blocked; use the read tool (secret values are masked).');
+            }
+            return safe;
+        }
+        // Create a guarded fs proxy that blocks reads AND writes outside workspace
+        // and to sensitive files. promisesGuard: optional set of guarded methods
+        // for the .promises sub-property.
         const createGuardedFsProxy = (realModule, guardedMethods, promisesGuard) => {
             return new Proxy(realModule, {
                 get(target, prop) {
@@ -305,19 +384,9 @@ const handlers = {
                     if (typeof original !== 'function') return original;
                     if (guardedMethods.has(prop)) {
                         return function(...args) {
-                            const filePath = String(args[0]);
-                            // Resolve symlinks to prevent alias bypass (symlink -> config.json)
-                            let resolvedPath = filePath;
-                            try { resolvedPath = fs.realpathSync(filePath); } catch (_) {}
-                            const basename = path.basename(resolvedPath);
-                            if (SECRETS_BLOCKED.has(basename)) {
-                                throw new Error(`Access to ${basename} is blocked for security.`);
-                            }
-                            // BAT-1087: agent_settings.json isn't in SECRETS_BLOCKED (masked
-                            // read is allowed via the read tool), but js_eval must not read it
-                            // raw — that would bypass masking for <7-char / corrupt-file secrets.
-                            if (basename === AGENT_SETTINGS_FILE) {
-                                throw new Error('Access to agent_settings.json via js_eval is blocked; use the read tool (secret values are masked).');
+                            const pathArgCount = FS_PATH_ARG_COUNT.get(String(prop)) || 1;
+                            for (let i = 0; i < pathArgCount; i++) {
+                                if (args[i] !== undefined) args[i] = guardFsPath(args[i]);
                             }
                             return original.apply(target, args);
                         };
@@ -326,13 +395,12 @@ const handlers = {
                 }
             });
         };
-        const FS_GUARDED = new Set([
-            'readFileSync', 'readFile', 'createReadStream', 'openSync', 'open',
-            'writeFileSync', 'writeFile', 'appendFileSync', 'appendFile', 'createWriteStream',
-            'copyFileSync', 'copyFile', 'cpSync', 'cp',
-            'symlinkSync', 'symlink', 'linkSync', 'link',
+        const FS_GUARDED = new Set(FS_PATH_ARG_COUNT.keys());
+        const FSP_GUARDED = new Set([
+            'access', 'stat', 'lstat', 'realpath', 'readdir', 'opendir', 'readlink',
+            'readFile', 'open', 'writeFile', 'appendFile', 'mkdir', 'rm', 'rmdir', 'unlink',
+            'chmod', 'chown', 'utimes', 'truncate', 'copyFile', 'cp', 'rename', 'symlink', 'link',
         ]);
-        const FSP_GUARDED = new Set(['readFile', 'writeFile', 'appendFile', 'open', 'copyFile', 'cp']);
         // Safe process subset — env contains ONLY user-set BAT-495 env vars.
         // System secrets (bot tokens, provider API keys from config.json) stay hidden
         // because they live in the `config` object, not process.env (with the

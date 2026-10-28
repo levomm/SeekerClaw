@@ -30,7 +30,10 @@ class NodeControlClientBudgetTest {
         // NodeControlClient targets 127.0.0.1:8766. A stalling server accepts the connection
         // (so it is NOT a fast connect-refused) but never writes a response → the client's READ
         // is what must be bounded by the budget.
-        server = ServerSocket(8766, 4, InetAddress.getByName("127.0.0.1"))
+        server = ServerSocket().apply {
+            reuseAddress = true
+            bind(java.net.InetSocketAddress(InetAddress.getByName("127.0.0.1"), 8766), 4)
+        }
         acceptThread = Thread {
             try {
                 while (!server.isClosed) {
@@ -46,6 +49,7 @@ class NodeControlClientBudgetTest {
     fun tearDown() {
         ServiceState.setBridgeTokenForTest(null)
         runCatching { server.close() }
+        if (::acceptThread.isInitialized) acceptThread.join(1000)
         synchronized(accepted) { accepted.forEach { runCatching { it.close() } } }
     }
 

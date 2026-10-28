@@ -108,7 +108,7 @@ fun ChannelConfigScreen(onBack: () -> Unit) {
             ).show()
             return
         }
-        showRestartDialog = true
+        if (ChannelSettingsPolicy.requiresRestart(field)) showRestartDialog = true
     }
 
     SeekerClawScaffold(title = "Channel", onBack = onBack) { padding ->
@@ -214,9 +214,8 @@ fun ChannelConfigScreen(onBack: () -> Unit) {
                     }
 
                     // Message formatting (BAT-1050) — Rich Messages toggle, default ON.
-                    // Routed through saveField() so it triggers the same restart prompt
-                    // as a channel switch: RICH_MESSAGES_ENABLED is read once at Node
-                    // startup, so the change only applies after the service restarts.
+                    // The sender reads this toggle live. Channel/token changes still
+                    // need a restart; Rich changes must not prompt for one.
                     Spacer(modifier = Modifier.height(24.dp))
                     SectionLabel("Formatting")
                     Spacer(modifier = Modifier.height(10.dp))
@@ -239,7 +238,7 @@ fun ChannelConfigScreen(onBack: () -> Unit) {
                                 Text(
                                     text = "Headings, tables, code blocks and math. " +
                                         "Falls back to classic formatting automatically if unsupported. " +
-                                        "Restart applies the change.",
+                                        "Applies live to subsequent replies; no restart needed.",
                                     fontFamily = RethinkSans,
                                     fontSize = 12.sp,
                                     color = SeekerClawColors.TextDim,

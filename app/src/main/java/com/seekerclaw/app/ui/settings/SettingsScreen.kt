@@ -444,6 +444,7 @@ fun SettingsScreen(
     // future field addition to either store doesn't accidentally
     // get classified by the obsolete "agent_settings.json" wording.
     val liveUpdateFields = setOf(
+        "richMessages",               // → live agent_settings.json overlay
         "maxStepsPerTurn",            // → agent_settings.json overlay
         "heartbeatIntervalMinutes",   // → agent_settings.json overlay
         "agentName",                  // → agent_preferences.json (BAT-515)
@@ -451,7 +452,10 @@ fun SettingsScreen(
     )
 
     fun saveField(field: String, value: String) {
-        ConfigManager.updateConfigField(context, field, value)
+        if (!ConfigManager.updateConfigField(context, field, value)) {
+            Toast.makeText(context, "Settings could not be published to the agent. Please retry.", Toast.LENGTH_LONG).show()
+            return
+        }
         config = ConfigManager.loadConfig(context)
         if (field !in liveUpdateFields) {
             showRestartDialog = true

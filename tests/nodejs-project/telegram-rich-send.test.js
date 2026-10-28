@@ -111,13 +111,14 @@ function reset() { richCalls.length = 0; classicCalls = 0; }
     eq('1 rich attempt', richCalls.length, 1);
     ok('classic fallback used (>=1)', classicCalls >= 1);
 
-    // ── 5. 429 transient -> classic fallback (not a duplicate) ─────
+    // ── 5. 429 transient -> retained/rejected, no immediate fallback ─
     console.log();
-    console.log('── rich 429 transient -> classic ──');
+    console.log('── rich 429 transient -> no immediate fallback ──');
     richMode = '429'; reset();
-    await telegram.sendMessage(555, 'hello');
+    const limited = await telegram.sendMessage(555, 'hello');
     eq('1 rich attempt', richCalls.length, 1);
-    ok('classic fallback used (>=1)', classicCalls >= 1);
+    eq('no classic retry after rate limit', classicCalls, 0);
+    eq('rate limit is not confirmed delivery', limited.status, 'rejected');
 
     // ── 6. method-not-found -> classic + disables rich for the run ─
     console.log();
