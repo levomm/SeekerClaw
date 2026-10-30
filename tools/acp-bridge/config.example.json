@@ -1,0 +1,6 @@
+{
+  "repos": {
+    "seekerclaw": "/srv/acp/repos/SeekerClaw"
+  },
+  "agents": ["codex", "claude", "pi"]
+}

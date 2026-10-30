@@ -26,6 +26,7 @@
 // the full set, which shouldn't happen in practice but defends us
 // against Telegram-side quota changes.
 const COMMAND_REGISTRY = [
+    { name: 'acp',      description: 'Delegate coding review to ACP agent' },
     { name: 'quick',    description: 'One-tap preset actions',         fallback: true },
     { name: 'status',   description: 'Bot status, uptime, model',      fallback: true },
     { name: 'model',    description: 'Show or switch AI model',        fallback: true },

@@ -146,6 +146,12 @@ Send me anything to get started!`;
             return `**Commands**\n\n${body}\n\n*${skillCount} skill${skillCount !== 1 ? 's' : ''} installed · /help to see this again*`;
         }
 
+        case '/acp': {
+            // Optional off-device ACP coding-agent delegation. Only owner messages
+            // reach handleCommand (see handleMessage ownership gate below).
+            return await require('./acp-remote').handleAcpCommand(args);
+        }
+
         case '/quick': {
             if (CHANNEL === 'discord') {
                 // Discord does not support Telegram inline keyboards — return a plain text menu
