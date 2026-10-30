@@ -216,8 +216,9 @@ function createBridge(config, options = {}) {
             }
         };
         child.on('error', onFailure);
+        child.stdout?.setEncoding('utf8');
         child.stdout?.on('data', data => {
-            bytes += data.length;
+            bytes += Buffer.byteLength(data, 'utf8');
             if (bytes > MAX_OUTPUT_BYTES) {
                 job.status = 'failed';
                 job.error = 'ACP output limit exceeded';
@@ -225,7 +226,7 @@ function createBridge(config, options = {}) {
                 killProcessGroup(child);
                 return;
             }
-            pending += data.toString('utf8');
+            pending += data;
             if (Buffer.byteLength(pending, 'utf8') > MAX_LINE_BYTES) {
                 job.status = 'failed';
                 job.error = 'ACP event too large';
@@ -272,7 +273,9 @@ function createBridge(config, options = {}) {
             json(res, 401, { error: 'unauthorized' });
             return;
         }
-        const pathname = new URL(req.url, 'http://localhost').pathname;
+        let pathname;
+        try { pathname = new URL(req.url, 'http://localhost').pathname; }
+        catch { json(res, 400, { error: 'invalid_path' }); return; }
         if (req.method === 'GET' && pathname === '/healthz') {
             json(res, 200, { ok: true, running: active, queued: queue.length });
             return;
@@ -304,6 +307,7 @@ function createBridge(config, options = {}) {
             let body;
             try { body = await readJson(req); }
             catch (err) { json(res, err.httpCode || 400, { error: err.httpCode === 413 ? 'body_too_large' : 'invalid_request' }); return; }
+            if (queue.length >= maxQueued) { json(res, 429, { error: 'queue_full' }); return; }
             if (!body || typeof body !== 'object' || Array.isArray(body)
                 || !agents.has(body.agent) || !Object.prototype.hasOwnProperty.call(repos, body.repo)
                 || typeof body.prompt !== 'string' || !body.prompt.trim()
@@ -327,6 +331,9 @@ function createBridge(config, options = {}) {
         }
         json(res, 404, { error: 'not_found' });
     });
+
+    server.requestTimeout = 20_000;
+    server.headersTimeout = 10_000;
 
     function close() {
         shuttingDown = true;
