@@ -1,0 +1,35 @@
+name: ACP bridge checks
+on:
+  pull_request:
+    paths:
+      - 'tools/acp-bridge/**'
+      - 'app/src/main/assets/nodejs-project/acp-remote.js'
+      - 'app/src/main/assets/nodejs-project/message-handler.js'
+      - 'app/src/main/assets/nodejs-project/telegram-commands.js'
+      - 'tests/nodejs-project/acp-remote.test.js'
+      - 'tests/nodejs-project/telegram-commands.test.js'
+      - '.github/workflows/acp-bridge.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/acp-bridge/**'
+      - 'app/src/main/assets/nodejs-project/acp-remote.js'
+      - 'app/src/main/assets/nodejs-project/message-handler.js'
+      - 'app/src/main/assets/nodejs-project/telegram-commands.js'
+      - 'tests/nodejs-project/acp-remote.test.js'
+      - 'tests/nodejs-project/telegram-commands.test.js'
+      - '.github/workflows/acp-bridge.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --test tools/acp-bridge/server.test.js tests/nodejs-project/acp-remote.test.js
+      - run: node tests/nodejs-project/telegram-commands.test.js
