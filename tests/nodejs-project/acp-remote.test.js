@@ -46,3 +46,8 @@ test('uses GET for status, POST for cancel and rejects malformed job IDs', async
     ]);
     assert.match(await handleAcpCommand('status ../../../etc/passwd', opts), /ACP delegation/);
 });
+
+test('invalid bridge URL reports an error to Telegram instead of crashing handler', async () => {
+    const text = await handleAcpCommand('list', { env: { ...VALID, SEEKER_ACP_URL: 'http://unsafe.example' } });
+    assert.match(text, /ACP bridge unavailable/);
+});
