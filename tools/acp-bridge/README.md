@@ -4,6 +4,9 @@ Owner-only Telegram commands send **asynchronous, read-oriented coding-agent
 jobs** to a separate Linux ACP worker. This is an optional feature: no env vars
 means no network call or changed behavior in the existing agent.
 
+Prompts are passed to acpx through stdin, not shell-interpreted arguments.
+The worker refuses to start as root.
+
 It uses [acpx](https://acpx.sh/quickstart.html) to talk to the official
 Agent Client Protocol adapters for Codex, Claude and Pi. The Android embedded
 Node.js runtime is **not** asked to run acpx or install npm packages.
