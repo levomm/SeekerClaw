@@ -48,12 +48,13 @@ sudo chmod -R a-w /srv/acp/repos/SeekerClaw
 
 # Have the SeekerClaw checkout (including this bridge) available to the service,
 # e.g. through the cloned repository above.
-sudo install -d -m 700 /etc/seeker-acp
+sudo install -d -m 750 -o root -g acpworker /etc/seeker-acp
 sudo cp /srv/acp/repos/SeekerClaw/tools/acp-bridge/config.example.json /etc/seeker-acp/config.json
 printf 'ACP_BRIDGE_TOKEN=%s\nACP_BRIDGE_CONFIG=/etc/seeker-acp/config.json\n' "$(openssl rand -hex 32)" \
   | sudo tee /etc/seeker-acp/bridge.env >/dev/null
 sudo chmod 600 /etc/seeker-acp/bridge.env
-sudo chmod 644 /etc/seeker-acp/config.json
+sudo chown root:acpworker /etc/seeker-acp/config.json
+sudo chmod 640 /etc/seeker-acp/config.json
 ```
 
 If you want to review a private repository, arrange a **redacted, read-only
@@ -90,6 +91,7 @@ Group=acpworker
 WorkingDirectory=/srv/acp/repos/SeekerClaw
 EnvironmentFile=/etc/seeker-acp/bridge.env
 Environment=HOME=/var/lib/acpworker
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/bin/node /srv/acp/repos/SeekerClaw/tools/acp-bridge/server.js
 Restart=on-failure
 RestartSec=3
