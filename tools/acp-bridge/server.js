@@ -175,17 +175,25 @@ function createBridge(config, options = {}) {
         job.progress = 'Starting ACP agent';
         active++;
         // No shell, fixed allowlisted agent/checkout, no arbitrary CLI options from callers.
+        // Use stdin rather than argv for prompts: secrets do not appear in ps and
+        // a prompt beginning with -- cannot be interpreted as a CLI option.
         const args = ['--format', 'json', '--json-strict', '--suppress-reads',
             '--approve-reads', '--non-interactive-permissions', 'deny',
             '--no-terminal', '--timeout', String(Math.ceil(timeoutMs / 1000)),
-            '--cwd', repos[job.repo], job.agent, 'exec', prompt];
+            '--cwd', repos[job.repo], job.agent, 'exec', '--file', '-'];
+        const childEnv = { ...process.env };
+        for (const key of Object.keys(childEnv)) {
+            if (key.startsWith('ACP_BRIDGE_')) delete childEnv[key];
+        }
         let child;
         try {
             child = run(options.acpxBin || 'acpx', args, {
                 cwd: repos[job.repo], shell: false, detached: process.platform !== 'win32',
-                stdio: ['ignore', 'pipe', 'pipe'],
+                env: childEnv, stdio: ['pipe', 'pipe', 'pipe'],
             });
             job.child = child;
+            child.stdin?.on('error', () => { /* EPIPE: adapter exited early */ });
+            child.stdin?.end(prompt);
         } catch {
             active--;
             job.status = 'failed';
@@ -344,6 +352,9 @@ function createBridge(config, options = {}) {
 }
 
 if (require.main === module) {
+    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+        throw new Error('Refusing to run ACP worker as root');
+    }
     const config = loadConfig();
     const bridge = createBridge(config);
     bridge.server.listen(config.port, config.host, () => {
