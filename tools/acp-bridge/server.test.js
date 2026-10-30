@@ -13,6 +13,7 @@ function fakeSpawnFactory() {
     const calls = [];
     function spawn(command, args, opts) {
         const child = new EventEmitter();
+        child.stdin = new PassThrough();
         child.stdout = new PassThrough();
         child.stderr = new PassThrough();
         child.kill = () => setImmediate(() => child.emit('close', null));
@@ -90,7 +91,9 @@ test('runs approved agent without a shell, parses ACP output and exposes no tool
         assert.deepEqual(c.args.slice(0, 4), ['--format', 'json', '--json-strict', '--suppress-reads']);
         assert.equal(c.args.includes('--approve-reads'), true);
         assert.equal(c.args.includes('--no-terminal'), true);
-        assert.equal(c.args.at(-1), 'Inspect README and do not change anything');
+        assert.deepEqual(c.args.slice(-3), ['exec', '--file', '-']);
+        assert.equal(c.args.includes('Inspect README and do not change anything'), false);
+        assert.equal(c.opts.env.ACP_BRIDGE_TOKEN, undefined);
         f.runner.children[0].stdout.write(JSON.stringify({
             method: 'session/update', params: { update: {
                 sessionUpdate: 'tool_call', title: 'Secret contents', rawOutput: 'DO NOT LEAK',
@@ -133,5 +136,16 @@ test('reports adapter failure without exposing stderr', async () => {
         assert.equal(detail.status, 'failed');
         assert.equal(detail.exitCode, 9);
         assert.equal(JSON.stringify(detail).includes('SECRET_ACCESS_TOKEN'), false);
+    } finally { await f.close(); }
+});
+
+test('keeps argument-looking prompts out of acpx flags', async () => {
+    const f = await fixture();
+    try {
+        await f.api('POST', '/v1/jobs', { agent: 'codex', repo: 'seekerclaw', prompt: '--approve-all' });
+        await tick();
+        assert.equal(f.runner.calls[0].args.includes('--approve-all'), false);
+        assert.equal(f.runner.calls[0].args.at(-1), '-');
+        finish(f.runner.children[0]);
     } finally { await f.close(); }
 });
