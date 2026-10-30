@@ -92,10 +92,10 @@ async function handleAcpCommand(args, opts = {}) {
     const tokens = String(args || '').trim().split(/\s+/);
     const verb = (tokens[0] || '').toLowerCase();
     if (!verb || verb === 'help') return help();
-    const config = resolveBridgeConfig(opts.env || process.env);
-    if (!config) return 'ACP is disabled. Set SEEKER_ACP_URL and SEEKER_ACP_TOKEN in Settings -> Env Vars.';
-    const makeRequest = opts.request || request;
     try {
+        const config = resolveBridgeConfig(opts.env || process.env);
+        if (!config) return 'ACP is disabled. Set SEEKER_ACP_URL and SEEKER_ACP_TOKEN in Settings -> Env Vars.';
+        const makeRequest = opts.request || request;
         if (verb === 'list' && tokens.length === 1) {
             const result = await makeRequest(config, 'GET', '/v1/jobs');
             if (!Array.isArray(result.jobs) || !result.jobs.length) return 'No ACP jobs yet.';
